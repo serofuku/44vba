@@ -50,26 +50,24 @@ void systemMessage(const char *fmt, ...) {
     ESP_LOGE("GBA", "%s", buf);
 }
 
-// Optimized screen draw — runs on Core 0
 void systemDrawScreen(void) {
     frameDrawn = 1;
     uint16_t *src = pix;
     uint16_t *dst = FB;
-    // Fast bswap pixel copy
     for (int i = 0; i < 160; i++) {
         for (int j = 0; j < 240; j++) {
             *dst++ = __builtin_bswap16(*src++);
         }
-        src += 16; // skip padding (256 - 240 = 16)
+        src += 16; // skip padding (256 - 240)
     }
     lcdSetWindow(0, 40, 239, 199);
     lcdWriteFB((uint8_t*)FB, 240 * 160 * 2);
 }
 
+// Sound disabled for performance
 void systemOnWriteDataToSoundBuffer(int16_t *finalWave, int length) {}
 
 static void allocBuffers() {
-    // Try PSRAM first, fallback to internal RAM
     #define PSRAM_ALLOC(size) heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
     #define IRAM_ALLOC(size)  heap_caps_malloc(size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
 
@@ -84,8 +82,6 @@ static void allocBuffers() {
 
     printf("FB:%p vram:%p workRAM:%p bios:%p pix:%p save:%p\n",
            FB, vram, workRAM, bios, pix, libretro_save_buf);
-
-    // Print free heap
     printf("Free internal: %lu, Free PSRAM: %lu\n",
            heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
            heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
@@ -95,7 +91,9 @@ void emuInit() {
     CPUSetupBuffers();
     CPUInit(NULL, false);
     CPUReset();
-    SetFrameskip(0); // 0 = no skip, 1 = skip every other frame
+    SetFrameskip(0);
+    // Start threaded renderer on Core 1
+    ThreadedRendererStart();
 }
 
 extern "C" void app_main() {
@@ -133,7 +131,6 @@ extern "C" void app_main() {
         UpdateJoypad();
         emuRunFrame();
 
-        // Print FPS every 60 frames
         if (frameCount % 60 == 0) {
             TickType_t now = xTaskGetTickCount();
             int ms = (now - fpsTick) * portTICK_PERIOD_MS;
