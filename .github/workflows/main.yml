@@ -35,6 +35,7 @@ jobs:
       - name: Patch project files
         run: |
           cd port-esp32s3
+          touch sdkconfig.defaults
           grep -v "COMPILER_WARN\|COMPILER_HIDE\|COMPILER_DISABLE\|WERROR\|WARNINGS_AS_ERRORS" \
             sdkconfig.defaults > sdkconfig.defaults.tmp || true
           mv sdkconfig.defaults.tmp sdkconfig.defaults
@@ -44,6 +45,8 @@ jobs:
           echo "CONFIG_PARTITION_TABLE_CUSTOM=y" >> sdkconfig.defaults
           echo "CONFIG_PARTITION_TABLE_CUSTOM_FILENAME=\"partitions.csv\"" >> sdkconfig.defaults
           echo "CONFIG_PARTITION_TABLE_OFFSET=0x8000" >> sdkconfig.defaults
+          echo "CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y" >> sdkconfig.defaults
+          echo "CONFIG_ESPTOOLPY_FLASHSIZE=\"16MB\"" >> sdkconfig.defaults
           sed -i 's/ -Werror / /g' CMakeLists.txt
           sed -i 's/ -Werror$//g' CMakeLists.txt
           sed -i 's/"-Werror"//g' CMakeLists.txt
