@@ -47,18 +47,13 @@ void systemDrawScreen(void) {
     frameDrawn = 1;
     uint16_t *src = pix;
     uint16_t *dst = FB;
-    for (int y = 0; y < 160; y++) {
-        for (int x = 0; x < 240; x++) {
+    for (int i = 0; i < 160; i++) {
+        for (int j = 0; j < 240; j++) {
             *dst++ = __builtin_bswap16(*src++);
         }
-        src += 256 - 240;
+        src += 16;
     }
     lcdSetWindow(0, 40, 239, 199);
-    lcdWriteFB((uint8_t*)FB, 240 * 160 * 2);
-}
-        src += 256 - 240;  // skip GBA buffer padding
-    }
-    lcdSetWindow(0, 40, 239, 199);  // center 160px in 320px display
     lcdWriteFB((uint8_t*)FB, 240 * 160 * 2);
 }
 
@@ -67,7 +62,8 @@ void systemOnWriteDataToSoundBuffer(int16_t *finalWave, int length) {}
 static void allocBuffers() {
     #define PSRAM_ALLOC(size) heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
     #define IRAM_ALLOC(size)  heap_caps_malloc(size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
-    FB               = (uint16_t*)(PSRAM_ALLOC(240 * 160 * 2) ?: IRAM_ALLOC(240 * 160 * 2));
+    FB               = (uint16_t*)PSRAM_ALLOC(240 * 160 * 2);
+    if (!FB) FB      = (uint16_t*)IRAM_ALLOC(240 * 160 * 2);
     vram             = (uint8_t *)(PSRAM_ALLOC(0x20000) ?: IRAM_ALLOC(0x20000));
     workRAM          = (uint8_t *)(PSRAM_ALLOC(0x40000) ?: IRAM_ALLOC(0x40000));
     bios             = (uint8_t *)(PSRAM_ALLOC(0x4000)  ?: IRAM_ALLOC(0x4000));
@@ -75,6 +71,9 @@ static void allocBuffers() {
     libretro_save_buf= (uint8_t *)(PSRAM_ALLOC(0x22000) ?: IRAM_ALLOC(0x22000));
     printf("FB:%p vram:%p workRAM:%p bios:%p pix:%p save:%p\n",
            FB, vram, workRAM, bios, pix, libretro_save_buf);
+    printf("Free internal: %lu, Free PSRAM: %lu\n",
+           heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+           heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 }
 
 void emuInit() {
@@ -113,11 +112,11 @@ extern "C" void app_main() {
         joy = osReadKey();
         UpdateJoypad();
         emuRunFrame();
-        if (frameCount % 120 == 0) {
+        if (frameCount % 60 == 0) {
             TickType_t now = xTaskGetTickCount();
             int ms = (now - fpsTick) * portTICK_PERIOD_MS;
             fpsTick = now;
-            printf("FPS: %d\n", ms > 0 ? (120 * 1000 / ms) : 0);
+            printf("FPS: %d\n", ms > 0 ? (60 * 1000 / ms) : 0);
         }
     }
 }
