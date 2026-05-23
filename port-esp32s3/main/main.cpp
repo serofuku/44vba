@@ -51,6 +51,11 @@ void systemDrawScreen(void) {
         for (int x = 0; x < 240; x++) {
             *dst++ = __builtin_bswap16(*src++);
         }
+        src += 256 - 240;
+    }
+    lcdSetWindow(0, 40, 239, 199);
+    lcdWriteFB((uint8_t*)FB, 240 * 160 * 2);
+}
         src += 256 - 240;  // skip GBA buffer padding
     }
     lcdSetWindow(0, 40, 239, 199);  // center 160px in 320px display
