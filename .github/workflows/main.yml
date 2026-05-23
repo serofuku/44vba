@@ -27,37 +27,29 @@ jobs:
       - name: Fix main.cpp API compatibility
         run: |
           cd port-esp32s3/main
-          echo "=== Original main.cpp head ==="
-          head -20 main.cpp
-
-          # Add missing include for spi_flash_mmap_handle_t and SPI_FLASH_MMAP_DATA
-          # These moved to esp_flash.h / spi_flash_mmap.h in ESP-IDF v5
           sed -i '1s/^/#include "spi_flash_mmap.h"\n/' main.cpp
-
-          echo "=== Fixed main.cpp head ==="
-          head -20 main.cpp
 
       - name: Patch project files
         run: |
           cd port-esp32s3
-
-          echo "=== Patching sdkconfig.defaults ==="
           grep -v "COMPILER_WARN\|COMPILER_HIDE\|COMPILER_DISABLE\|WERROR\|WARNINGS_AS_ERRORS" \
             sdkconfig.defaults > sdkconfig.defaults.tmp || true
           mv sdkconfig.defaults.tmp sdkconfig.defaults
           echo "CONFIG_COMPILER_DISABLE_GCC12_WARNINGS=y" >> sdkconfig.defaults
           echo "CONFIG_COMPILER_WARNINGS_AS_ERRORS=n" >> sdkconfig.defaults
           echo "CONFIG_COMPILER_WARN_WRITE_STRINGS=n" >> sdkconfig.defaults
-          cat sdkconfig.defaults
-
-          echo "=== Patching CMakeLists.txt ==="
           sed -i 's/ -Werror / /g' CMakeLists.txt
           sed -i 's/ -Werror$//g' CMakeLists.txt
           sed -i 's/"-Werror"//g' CMakeLists.txt
           if ! grep -q "Wno-error" CMakeLists.txt; then
             sed -i '/cmake_minimum_required/a add_compile_options(-Wno-error -Wno-unused-but-set-variable -Wno-unused-function -Wno-implicit-fallthrough -Wno-format)' CMakeLists.txt
           fi
-          cat CMakeLists.txt
+
+      - name: Patch gba.cpp
+        run: |
+          cd 44vba/src
+          sed -i 's/sscanf(buffer, "%x", &address)/sscanf(buffer, "%lx", \&address)/g' gba.cpp
+          sed -i 's/sscanf(buffer, "%x", &value)/sscanf(buffer, "%lx", \&value)/g' gba.cpp
 
       - name: Build
         run: |
@@ -82,7 +74,6 @@ jobs:
         run: |
           . ~/esp-idf/export.sh
           cd port-esp32s3
-
           APP_BIN=""
           for NAME in esp32s3 44vba vba gba main app port-esp32s3; do
             if [ -f "build/${NAME}.bin" ]; then
@@ -108,15 +99,7 @@ jobs:
               ! -path "*/CheckTypeSize/*" \
               2>/dev/null | head -1)
           fi
-
           echo "App binary: $APP_BIN"
-
-          MISSING=0
-          [ ! -f "build/bootloader/bootloader.bin" ] && echo "ERROR: bootloader missing!" && MISSING=1
-          [ ! -f "build/partition_table/partition-table.bin" ] && echo "ERROR: partition table missing!" && MISSING=1
-          { [ -z "$APP_BIN" ] || [ ! -f "$APP_BIN" ]; } && echo "ERROR: app binary missing!" && MISSING=1
-          [ "$MISSING" = "1" ] && find build -type f | sort && exit 1
-
           esptool.py --chip esp32s3 merge_bin \
             -o 44vba-merged.bin \
             --flash_mode dio \
@@ -124,7 +107,6 @@ jobs:
             0x0000 build/bootloader/bootloader.bin \
             0x8000 build/partition_table/partition-table.bin \
             0x10000 $APP_BIN
-
           ls -lh 44vba-merged.bin
 
       - name: Upload firmware
