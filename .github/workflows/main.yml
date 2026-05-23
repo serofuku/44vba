@@ -32,6 +32,11 @@ jobs:
           sed -i 's/spi_flash_mmap_memory_t/esp_partition_mmap_memory_t/g' main.cpp
           sed -i 's/spi_flash_mmap_handle_t/esp_partition_mmap_handle_t/g' main.cpp
 
+      - name: Show sdkconfig
+        run: |
+          echo "=== sdkconfig.defaults ==="
+          cat port-esp32s3/sdkconfig.defaults
+
       - name: Patch project files
         run: |
           cd port-esp32s3
