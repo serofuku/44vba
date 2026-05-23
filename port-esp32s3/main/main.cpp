@@ -11,14 +11,12 @@
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_heap_caps.h"
-#include "esp_wifi.h"
 #include "os.h"
 #include "nvs_flash.h"
 #include "sdkconfig.h"
 #include "spi_flash_mmap.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "freertos/semphr.h"
 #define TAG "MAIN"
 #undef B0
 #include "gba.h"
@@ -49,13 +47,13 @@ void systemDrawScreen(void) {
     frameDrawn = 1;
     uint16_t *src = pix;
     uint16_t *dst = FB;
-    for (int i = 0; i < 160; i++) {
-        for (int j = 0; j < 240; j++) {
+    for (int y = 0; y < 160; y++) {
+        for (int x = 0; x < 240; x++) {
             *dst++ = __builtin_bswap16(*src++);
         }
-        src += 16;
+        src += 256 - 240;  // skip GBA buffer padding
     }
-    lcdSetWindow(0, 80, 239, 239);
+    lcdSetWindow(0, 40, 239, 199);  // center 160px in 320px display
     lcdWriteFB((uint8_t*)FB, 240 * 160 * 2);
 }
 
@@ -72,9 +70,6 @@ static void allocBuffers() {
     libretro_save_buf= (uint8_t *)(PSRAM_ALLOC(0x22000) ?: IRAM_ALLOC(0x22000));
     printf("FB:%p vram:%p workRAM:%p bios:%p pix:%p save:%p\n",
            FB, vram, workRAM, bios, pix, libretro_save_buf);
-    printf("Free internal: %lu, Free PSRAM: %lu\n",
-           heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
-           heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 }
 
 void emuInit() {
@@ -88,7 +83,7 @@ extern "C" void app_main() {
     osInit();
     delayMS(200);
     allocBuffers();
-    memset(FB, 0, LCD_W * LCD_H * 2);
+    memset(FB, 0, 240 * 160 * 2);
     lcdSetWindow(0, 0, LCD_W - 1, LCD_H - 1);
     lcdWriteFB((uint8_t*)FB, LCD_W * LCD_H * 2);
     printf("44VBA starting...\n");
@@ -113,11 +108,11 @@ extern "C" void app_main() {
         joy = osReadKey();
         UpdateJoypad();
         emuRunFrame();
-        if (frameCount % 60 == 0) {
+        if (frameCount % 120 == 0) {
             TickType_t now = xTaskGetTickCount();
             int ms = (now - fpsTick) * portTICK_PERIOD_MS;
             fpsTick = now;
-            printf("FPS: %d\n", ms > 0 ? (60 * 1000 / ms) : 0);
+            printf("FPS: %d\n", ms > 0 ? (120 * 1000 / ms) : 0);
         }
     }
 }
