@@ -11,16 +11,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Init submodules
+      - name: Fix submodules
         run: |
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
           git submodule update --init libretro-common
+          git submodule deinit 44gba-watchos || true
+          git rm --cached 44gba-watchos || true
 
       - name: Install ESP-IDF
         run: |
           sudo apt-get install -y git wget flex bison gperf python3 python3-pip python3-venv cmake ninja-build ccache libffi-dev libssl-dev dfu-util libusb-1.0-0
-          git clone --recursive https://github.com/espressif/esp-idf.git ~/esp-idf
+          git clone --depth 1 --branch v5.1.2 --recursive https://github.com/espressif/esp-idf.git ~/esp-idf
           cd ~/esp-idf
-          git checkout v5.1.2
           ./install.sh esp32s3
 
       - name: Build
@@ -28,10 +30,17 @@ jobs:
           . ~/esp-idf/export.sh
           cd port-esp32s3
           idf.py set-target esp32s3
-          idf.py build
+          idf.py build 2>&1 | tee build.log
 
       - name: Upload firmware
         uses: actions/upload-artifact@v4
         with:
           name: 44vba-esp32s3
           path: port-esp32s3/build/44vba.bin
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: port-esp32s3/build.log
