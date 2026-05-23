@@ -92,7 +92,7 @@ void emuInit() {
     CPUSetupBuffers();
     CPUInit(NULL, false);
     CPUReset();
-    SetFrameskip(0);
+    SetFrameskip(1);
     ThreadedRendererStart();
 }
 
