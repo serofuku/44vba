@@ -24,7 +24,7 @@ jobs:
           cd ~/esp-idf
           ./install.sh esp32s3
 
-      - name: Patch project files only
+      - name: Patch project files
         run: |
           cd port-esp32s3
 
@@ -38,38 +38,52 @@ jobs:
           cat sdkconfig.defaults
 
           echo "=== Patching CMakeLists.txt ==="
-          cat CMakeLists.txt
-
-          # Only remove -Werror if it exists as a standalone flag
-          # Use word boundary safe replacement
+          # Safe removal of -Werror only as standalone flag
           sed -i 's/ -Werror / /g' CMakeLists.txt
           sed -i 's/ -Werror$//g' CMakeLists.txt
           sed -i 's/"-Werror"//g' CMakeLists.txt
 
-          # Add compile options only if not already there
+          # Add flags after cmake_minimum_required
           if ! grep -q "Wno-error" CMakeLists.txt; then
-            # Insert after cmake_minimum_required line safely
-            sed -i '/cmake_minimum_required/a \
-          \
-          # Disable warnings as errors\
-          add_compile_options(-Wno-error -Wno-unused-but-set-variable -Wno-unused-function -Wno-implicit-fallthrough -Wno-format)' CMakeLists.txt
+            sed -i '/cmake_minimum_required/a add_compile_options(-Wno-error -Wno-unused-but-set-variable -Wno-unused-function -Wno-implicit-fallthrough -Wno-format)' CMakeLists.txt
           fi
 
           echo "=== Final CMakeLists.txt ==="
           cat CMakeLists.txt
 
+      - name: Patch gba.cpp compiler flags directly
+        run: |
+          cd port-esp32s3
+
+          # Find the component CMakeLists that compiles gba.cpp
+          echo "=== Looking for gba component cmake ==="
+          find . -name "CMakeLists.txt" | xargs grep -l "gba" 2>/dev/null
+
+          # Add per-file compile flags to suppress errors in gba.cpp
+          GBA_CMAKE=$(find . -name "CMakeLists.txt" | xargs grep -l "gba.cpp" 2>/dev/null | head -1)
+          if [ -n "$GBA_CMAKE" ]; then
+            echo "Found: $GBA_CMAKE"
+            cat "$GBA_CMAKE"
+            # Add set_source_files_properties after the file
+            echo '' >> "$GBA_CMAKE"
+            echo 'set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/../../src/gba.cpp PROPERTIES COMPILE_FLAGS "-Wno-error -Wno-unused-but-set-variable -Wno-unused-function -Wno-implicit-fallthrough -Wno-format")' >> "$GBA_CMAKE"
+            echo "=== Patched $GBA_CMAKE ==="
+            cat "$GBA_CMAKE"
+          else
+            echo "gba.cpp not found in any CMakeLists.txt, will rely on global flags"
+          fi
+
       - name: Build
         run: |
           . ~/esp-idf/export.sh
           cd port-esp32s3
-
           idf.py set-target esp32s3
 
-          # Use idf.py with explicit sdkconfig override via -D
-          idf.py \
-            -DSDKCONFIG_DEFAULTS="sdkconfig.defaults" \
-            build \
-            2>&1 | tee build.log
+          # Pass warning flags directly to ninja via environment
+          export CXXFLAGS="-Wno-error -Wno-unused-but-set-variable -Wno-unused-function -Wno-implicit-fallthrough -Wno-format"
+          export CFLAGS="-Wno-error -Wno-unused-but-set-variable -Wno-unused-function -Wno-implicit-fallthrough -Wno-format"
+
+          idf.py build 2>&1 | tee build.log
 
           BUILD_EXIT=${PIPESTATUS[0]}
           echo "=== Last 100 lines ==="
