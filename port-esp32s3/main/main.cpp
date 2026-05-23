@@ -13,6 +13,7 @@
 #include "esp_system.h"
 #include "esp_wifi.h"
 #include "esp_pm.h"
+#include "esp_task_wdt.h"
 #include "os.h"
 #include "nvs_flash.h"
 #include "sdkconfig.h"
@@ -22,7 +23,7 @@
 #include "esp_heap_caps.h"
 
 #define TAG "MAIN"
-#define FRAMESKIP 0  // 0 = no skip, 1 = skip every other, 2 = skip 2 etc
+#define FRAMESKIP 0
 
 #undef B0
 #include "gba.h"
@@ -36,9 +37,9 @@ static uint16_t *FB_back  = NULL;
 static SemaphoreHandle_t frameSemaphore = NULL;
 static SemaphoreHandle_t bufferMutex    = NULL;
 
-static int      frameDrawn       = 0;
-static uint32_t frameCount       = 0;
-static int      frameskipCounter = 0;
+static int       frameDrawn       = 0;
+static uint32_t  frameCount       = 0;
+static int       frameskipCounter = 0;
 
 // ─── GBA callbacks ────────────────────────────────────────────────────────────
 
@@ -54,14 +55,13 @@ void systemMessage(const char *fmt, ...) {
 void systemDrawScreen(void) {
     frameDrawn = 1;
 
-    // Frameskip
     frameskipCounter++;
     if (frameskipCounter <= FRAMESKIP) {
         return;
     }
     frameskipCounter = 0;
 
-    // Copy pix → FB_back (2 pixels at a time using 32-bit writes)
+    // Copy pix → FB_back (2 pixels at a time)
     uint16_t *src   = pix;
     uint32_t *dst32 = (uint32_t *)FB_back;
 
@@ -71,23 +71,21 @@ void systemDrawScreen(void) {
                          ((uint32_t)__builtin_bswap16(src[x + 1]) << 16);
             *dst32++ = p;
         }
-        src += 256;  // GBA pix stride is 256 not 240
+        src += 256;
     }
 
-    // Swap front and back buffers
+    // Swap buffers
     xSemaphoreTake(bufferMutex, portMAX_DELAY);
     uint16_t *tmp = FB_front;
     FB_front      = FB_back;
     FB_back       = tmp;
     xSemaphoreGive(bufferMutex);
 
-    // Signal display task that a new frame is ready
+    // Signal display task
     xSemaphoreGive(frameSemaphore);
 }
 
-void systemOnWriteDataToSoundBuffer(int16_t *finalWave, int length) {
-    // Audio not implemented — silent
-}
+void systemOnWriteDataToSoundBuffer(int16_t *finalWave, int length) {}
 
 // ─── Emulator init ────────────────────────────────────────────────────────────
 
@@ -109,6 +107,9 @@ void emuRunFrame() {
 // ─── Core 1: Emulator task ────────────────────────────────────────────────────
 
 static void emuTask(void *arg) {
+    // Remove this task from watchdog monitoring
+    esp_task_wdt_delete(NULL);
+
     TickType_t fpsTick = xTaskGetTickCount();
 
     while (1) {
@@ -123,6 +124,9 @@ static void emuTask(void *arg) {
             int fps        = 120 * 1000 / msPassed;
             printf("FPS: %d\n", fps);
         }
+
+        // Yield to let idle task run
+        taskYIELD();
     }
 }
 
@@ -171,7 +175,7 @@ extern "C" void app_main() {
     lcdSetWindow(0, 0, LCD_W - 1, LCD_H - 1);
     lcdWriteFB((uint8_t *)FB_front, 240 * 160 * sizeof(uint16_t));
 
-    // Allocate all GBA buffers in PSRAM
+    // Allocate GBA buffers in PSRAM
     vram              = (uint8_t *)  heap_caps_malloc(0x20000,          MALLOC_CAP_SPIRAM);
     workRAM           = (uint8_t *)  heap_caps_malloc(0x40000,          MALLOC_CAP_SPIRAM);
     bios              = (uint8_t *)  heap_caps_malloc(0x4000,           MALLOC_CAP_SPIRAM);
@@ -218,12 +222,12 @@ extern "C" void app_main() {
     // Launch display task on Core 0
     xTaskCreatePinnedToCore(
         displayTask, "disp",
-        4096, NULL, 5, NULL, 0);
+        4096, NULL, 4, NULL, 0);
 
     // Launch emulator task on Core 1
     xTaskCreatePinnedToCore(
         emuTask, "emu",
-        8192, NULL, 5, NULL, 1);
+        16384, NULL, 5, NULL, 1);
 
     // app_main exits — tasks keep running
 }
