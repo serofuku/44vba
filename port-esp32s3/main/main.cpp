@@ -4,25 +4,22 @@
 #include <sys/param.h>
 #include <sys/stat.h>
 #include <sys/unistd.h>
-#include "config.h"
 #include "driver/gpio.h"
 #include "driver/sdmmc_host.h"
 #include "esp_err.h"
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "esp_heap_caps.h"
 #include "esp_wifi.h"
 #include "os.h"
 #include "nvs_flash.h"
 #include "sdkconfig.h"
-#include "esp_heap_caps.h"
 #include "spi_flash_mmap.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
-
 #define TAG "MAIN"
-
 #undef B0
 #include "gba.h"
 #include "globals.h"
@@ -58,29 +55,21 @@ void systemDrawScreen(void) {
         }
         src += 16;
     }
-    lcdSetWindow(0, 40, 239, 199);
+    lcdSetWindow(0, 0, 239, 159);
     lcdWriteFB((uint8_t*)FB, 240 * 160 * 2);
 }
 
-// Sound completely disabled for max performance
 void systemOnWriteDataToSoundBuffer(int16_t *finalWave, int length) {}
 
 static void allocBuffers() {
     #define PSRAM_ALLOC(size) heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
     #define IRAM_ALLOC(size)  heap_caps_malloc(size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
-
-    // Frame buffer in PSRAM
-    FB = (uint16_t*)PSRAM_ALLOC(240 * 160 * 2);
-    if (!FB) FB = (uint16_t*)IRAM_ALLOC(240 * 160 * 2);
-
-    // Large GBA buffers in PSRAM
+    FB               = (uint16_t*)(PSRAM_ALLOC(240 * 160 * 2) ?: IRAM_ALLOC(240 * 160 * 2));
     vram             = (uint8_t *)(PSRAM_ALLOC(0x20000) ?: IRAM_ALLOC(0x20000));
     workRAM          = (uint8_t *)(PSRAM_ALLOC(0x40000) ?: IRAM_ALLOC(0x40000));
     bios             = (uint8_t *)(PSRAM_ALLOC(0x4000)  ?: IRAM_ALLOC(0x4000));
-    // pix buffer needs fast access - try internal first
     pix              = (uint16_t*)(IRAM_ALLOC(4 * 256 * 160) ?: PSRAM_ALLOC(4 * 256 * 160));
     libretro_save_buf= (uint8_t *)(PSRAM_ALLOC(0x22000) ?: IRAM_ALLOC(0x22000));
-
     printf("FB:%p vram:%p workRAM:%p bios:%p pix:%p save:%p\n",
            FB, vram, workRAM, bios, pix, libretro_save_buf);
     printf("Free internal: %lu, Free PSRAM: %lu\n",
@@ -98,13 +87,10 @@ void emuInit() {
 extern "C" void app_main() {
     osInit();
     delayMS(200);
-
     allocBuffers();
-    memset(FB, 0, 240 * 160 * 2);
-
+    memset(FB, 0, LCD_W * LCD_H * 2);
     lcdSetWindow(0, 0, LCD_W - 1, LCD_H - 1);
-    lcdWriteFB((uint8_t*)FB, 240 * 160 * 2);
-
+    lcdWriteFB((uint8_t*)FB, LCD_W * LCD_H * 2);
     printf("44VBA starting...\n");
 
     spi_flash_mmap_handle_t outHandle;
@@ -123,12 +109,10 @@ extern "C" void app_main() {
     emuInit();
 
     TickType_t fpsTick = xTaskGetTickCount();
-
     while (1) {
         joy = osReadKey();
         UpdateJoypad();
         emuRunFrame();
-
         if (frameCount % 60 == 0) {
             TickType_t now = xTaskGetTickCount();
             int ms = (now - fpsTick) * portTICK_PERIOD_MS;
