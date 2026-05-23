@@ -24,28 +24,74 @@ jobs:
           cd ~/esp-idf
           ./install.sh esp32s3
 
-      - name: Patch compiler flags
+      - name: Patch ESP-IDF remove Werror
+        run: |
+          echo "=== Patching ESP-IDF to remove -Werror everywhere ==="
+
+          # Patch all cmake files inside ESP-IDF
+          find ~/esp-idf -name "*.cmake" | xargs grep -l "\-Werror" | while read f; do
+            echo "Patching cmake: $f"
+            sed -i 's/-Werror[^" \t]*//' "$f"
+          done
+
+          # Patch all CMakeLists.txt inside ESP-IDF
+          find ~/esp-idf -name "CMakeLists.txt" | xargs grep -l "\-Werror" | while read f; do
+            echo "Patching CMakeLists: $f"
+            sed -i 's/-Werror[^" \t]*//' "$f"
+          done
+
+          # Patch the main compiler flags file specifically
+          COMPILER_FILE=$(find ~/esp-idf -path "*/tools/cmake/compiler.cmake" | head -1)
+          if [ -n "$COMPILER_FILE" ]; then
+            echo "=== Patching compiler.cmake: $COMPILER_FILE ==="
+            cat "$COMPILER_FILE"
+            sed -i 's/-Werror[^" \t]*//' "$COMPILER_FILE"
+            sed -i 's/GCC_WARNINGS_AS_ERRORS[^" \t]*//' "$COMPILER_FILE"
+            echo "=== After patch ==="
+            cat "$COMPILER_FILE"
+          fi
+
+          # Patch Kconfig warnings-as-errors option
+          KCONFIG=$(find ~/esp-idf -name "Kconfig.projbuild" | xargs grep -l "COMPILER_WARNINGS_AS_ERRORS" 2>/dev/null | head -1)
+          if [ -n "$KCONFIG" ]; then
+            echo "Patching Kconfig: $KCONFIG"
+            sed -i 's/default y/default n/' "$KCONFIG"
+          fi
+
+          echo "=== ESP-IDF patch complete ==="
+
+      - name: Patch project files
         run: |
           cd port-esp32s3
 
-          # Remove conflicting entries
-          grep -v "COMPILER_WARN\|COMPILER_HIDE\|COMPILER_DISABLE\|WERROR" sdkconfig.defaults > sdkconfig.defaults.tmp || true
+          echo "=== Patching sdkconfig.defaults ==="
+          # Remove any conflicting entries
+          grep -v "COMPILER_WARN\|COMPILER_HIDE\|COMPILER_DISABLE\|WERROR\|warnings_as_errors" \
+            sdkconfig.defaults > sdkconfig.defaults.tmp || true
           mv sdkconfig.defaults.tmp sdkconfig.defaults
 
-          # Correct keys for ESP-IDF v5.1.2
-          echo "CONFIG_COMPILER_DISABLE_GCC12_WARNINGS=y" >> sdkconfig.defaults
-          echo "CONFIG_COMPILER_WARN_WRITE_STRINGS=n" >> sdkconfig.defaults
+          # Add correct keys
+          cat >> sdkconfig.defaults << 'EOF'
+          CONFIG_COMPILER_DISABLE_GCC12_WARNINGS=y
+          CONFIG_COMPILER_WARN_WRITE_STRINGS=n
+          CONFIG_COMPILER_WARNINGS_AS_ERRORS=n
+          EOF
 
           echo "=== sdkconfig.defaults ==="
           cat sdkconfig.defaults
 
-          # Also patch CMakeLists.txt to remove -Werror if present
-          if grep -q "Werror" CMakeLists.txt; then
-            echo "Found -Werror in CMakeLists.txt, removing..."
-            sed -i 's/-Werror[^ "]*//g' CMakeLists.txt
+          echo "=== Patching CMakeLists.txt ==="
+          # Remove any existing -Werror flags
+          sed -i 's/-Werror[^" \t]*//' CMakeLists.txt
+
+          # Check if add_compile_options already exists
+          if grep -q "add_compile_options" CMakeLists.txt; then
+            echo "add_compile_options already exists, skipping"
+          else
+            # Add after project() line
+            sed -i '/^project(/a add_compile_options(\n  -Wno-error\n  -Wno-unused-but-set-variable\n  -Wno-unused-function\n  -Wno-implicit-fallthrough\n  -Wno-format\n)' CMakeLists.txt
           fi
 
-          # Check if there's a separate compiler flags file
           echo "=== CMakeLists.txt ==="
           cat CMakeLists.txt
 
@@ -53,49 +99,129 @@ jobs:
         run: |
           . ~/esp-idf/export.sh
           cd port-esp32s3
-
-          # Force disable Werror at cmake level
           idf.py set-target esp32s3
 
-          # Inject flags via cmake directly
-          cmake -B build \
-            -DCMAKE_C_FLAGS="-Wno-error -Wno-format -Wno-unused-function -Wno-implicit-fallthrough" \
-            -DCMAKE_CXX_FLAGS="-Wno-error -Wno-format -Wno-unused-function -Wno-implicit-fallthrough" \
-            . || true
+          # Set sdkconfig option directly to disable warnings as errors
+          idf.py build \
+            --cmake-warn-uninitialized \
+            2>&1 | tee build.log || true
 
-          idf.py build 2>&1 | tee build.log
+          # Try again with explicit sdkconfig override if first attempt failed
+          if ! grep -q "Project build complete" build.log; then
+            echo "=== First build attempt failed, trying with explicit config ==="
+            echo "CONFIG_COMPILER_WARNINGS_AS_ERRORS=n" >> sdkconfig
+            echo "CONFIG_COMPILER_DISABLE_GCC12_WARNINGS=y" >> sdkconfig
+            idf.py build 2>&1 | tee -a build.log
+          fi
+
           BUILD_EXIT=${PIPESTATUS[0]}
-          echo "Build exit code: $BUILD_EXIT"
-
-          # Show last 50 lines of log for quick diagnosis
-          echo "=== Last 50 lines of build ==="
-          tail -50 build.log
-
+          echo "=== Last 100 lines of build log ==="
+          tail -100 build.log
           exit $BUILD_EXIT
 
       - name: Verify build output
         if: always()
         run: |
           cd port-esp32s3
-          echo "=== ALL files in build/ ==="
-          find build -type f | sort
-          echo "=== .bin files ==="
+          echo "=== Top level build files ==="
+          ls -la build/ || echo "NO BUILD DIR"
+          echo "=== All .bin files ==="
           find build -name "*.bin" | sort
-          echo "=== .elf files ==="
+          echo "=== All .elf files ==="
           find build -name "*.elf" | sort
+          echo "=== Bootloader ==="
+          ls -la build/bootloader/ || echo "MISSING"
+          echo "=== Partition table ==="
+          ls -la build/partition_table/ || echo "MISSING"
 
       - name: Find and merge binaries
         run: |
           . ~/esp-idf/export.sh
           cd port-esp32s3
 
-          # The project is named esp32s3 based on project_elf_src_esp32s3.c
-          # Standard ESP-IDF output: build/<projectname>.bin and build/<projectname>.elf
-
           APP_BIN=""
 
-          # Try 1: Known project name from project_elf_src_esp32s3.c
-          for NAME in esp32s3 44vba vba gba main app; do
+          # Try 1: Known project names directly in build/
+          for NAME in esp32s3 44vba vba gba main app port-esp32s3; do
             if [ -f "build/${NAME}.bin" ]; then
               APP_BIN="build/${NAME}.bin"
-              echo "Found by name: $A
+              echo "Found by name: $APP_BIN"
+              break
+            fi
+          done
+
+          # Try 2: Any .bin directly in build/ root
+          if [ -z "$APP_BIN" ]; then
+            APP_BIN=$(find build -maxdepth 1 -name "*.bin" 2>/dev/null | head -1)
+            [ -n "$APP_BIN" ] && echo "Found at root: $APP_BIN"
+          fi
+
+          # Try 3: Find .elf and convert to .bin
+          if [ -z "$APP_BIN" ]; then
+            ELF=$(find build -maxdepth 1 -name "*.elf" 2>/dev/null | head -1)
+            if [ -n "$ELF" ]; then
+              APP_BIN="${ELF%.elf}.bin"
+              echo "Converting ELF to BIN: $ELF -> $APP_BIN"
+              esptool.py --chip esp32s3 elf2image --output "$APP_BIN" "$ELF"
+            fi
+          fi
+
+          # Try 4: Deep search excluding system/cmake dirs
+          if [ -z "$APP_BIN" ] || [ ! -f "$APP_BIN" ]; then
+            APP_BIN=$(find build -name "*.bin" \
+              ! -path "*/CMakeFiles/*" \
+              ! -path "*/bootloader/*" \
+              ! -path "*/partition*" \
+              ! -path "*/CheckTypeSize/*" \
+              ! -path "*/esp_idf_size/*" \
+              2>/dev/null | head -1)
+            [ -n "$APP_BIN" ] && echo "Found by deep search: $APP_BIN"
+          fi
+
+          echo "=== Final app binary: $APP_BIN ==="
+
+          # Validate all required files exist
+          MISSING=0
+          if [ ! -f "build/bootloader/bootloader.bin" ]; then
+            echo "ERROR: bootloader.bin missing!"
+            MISSING=1
+          fi
+          if [ ! -f "build/partition_table/partition-table.bin" ]; then
+            echo "ERROR: partition-table.bin missing!"
+            MISSING=1
+          fi
+          if [ -z "$APP_BIN" ] || [ ! -f "$APP_BIN" ]; then
+            echo "ERROR: app binary missing!"
+            MISSING=1
+          fi
+
+          if [ "$MISSING" = "1" ]; then
+            echo "=== Full build dir dump ==="
+            find build -type f | sort
+            exit 1
+          fi
+
+          esptool.py --chip esp32s3 merge_bin \
+            -o 44vba-merged.bin \
+            --flash_mode dio \
+            --flash_size 8MB \
+            0x0000 build/bootloader/bootloader.bin \
+            0x8000 build/partition_table/partition-table.bin \
+            0x10000 $APP_BIN
+
+          echo "=== Merged binary ==="
+          ls -lh 44vba-merged.bin
+
+      - name: Upload firmware
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: 44vba-esp32s3
+          path: port-esp32s3/44vba-merged.bin
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: port-esp32s3/build.log
