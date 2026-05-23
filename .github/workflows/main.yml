@@ -39,53 +39,79 @@ jobs:
           cd port-esp32s3
           idf.py set-target esp32s3
           idf.py build -DEXTRA_CXXFLAGS="-Wno-error -Wno-unused-function -Wno-implicit-fallthrough -Wno-format" 2>&1 | tee build.log
+          echo "Exit code: $?"
 
       - name: Verify build output
         run: |
           cd port-esp32s3
-          echo "=== Build directory top level ==="
-          ls -la build/
-          echo "=== Bootloader ==="
-          ls -la build/bootloader/ || echo "MISSING bootloader dir"
-          echo "=== Partition table ==="
-          ls -la build/partition_table/ || echo "MISSING partition table dir"
-          echo "=== App binary ==="
-          ls -la build/*.bin || echo "MISSING app bin at top level"
-          echo "=== All bins ==="
-          find build -name "*.bin" | sort
+          echo "=== port-esp32s3 root ==="
+          ls -la
+          echo "=== build/ top level ==="
+          ls -la build/ || echo "NO BUILD DIR"
+          echo "=== build/bootloader/ ==="
+          ls -la build/bootloader/ || echo "MISSING bootloader"
+          echo "=== build/partition_table/ ==="
+          ls -la build/partition_table/ || echo "MISSING partition table"
+          echo "=== ALL .bin files ==="
+          find build -name "*.bin" | sort || echo "NO BIN FILES FOUND"
+          echo "=== ALL .elf files ==="
+          find build -name "*.elf" | sort || echo "NO ELF FILES FOUND"
+          echo "=== CMakeLists.txt exists? ==="
+          cat CMakeLists.txt || echo "NO CMakeLists.txt"
 
       - name: Find and merge binaries
         run: |
           . ~/esp-idf/export.sh
           cd port-esp32s3
 
-          # Get the real app binary directly in build/ (not in subdirs)
-          APP_BIN=$(find build -maxdepth 1 -name "*.bin" | head -1)
+          echo "=== Searching for app binary ==="
 
-          # Fallback: search deeper but exclude CMake test files and system bins
+          # Try 1: .bin directly in build/ (standard ESP-IDF output)
+          APP_BIN=$(find build -maxdepth 1 -name "*.bin" 2>/dev/null | head -1)
+          echo "Try 1 (build/*.bin): $APP_BIN"
+
+          # Try 2: .elf converted — find elf and use same name with .bin
           if [ -z "$APP_BIN" ]; then
-            APP_BIN=$(find build -name "*.bin" \
-              ! -path "*/bootloader/*" \
-              ! -path "*/partition*" \
-              ! -path "*/CMakeFiles/*" \
-              ! -path "*/CheckTypeSize/*" \
-              ! -path "*/esp_idf_size/*" \
-              | head -1)
+            ELF=$(find build -maxdepth 1 -name "*.elf" 2>/dev/null | head -1)
+            if [ -n "$ELF" ]; then
+              BASENAME="${ELF%.elf}"
+              APP_BIN="${BASENAME}.bin"
+              echo "Try 2 (from .elf): generating $APP_BIN from $ELF"
+              esptool.py --chip esp32s3 elf2image --output "$APP_BIN" "$ELF"
+            fi
           fi
 
-          echo "Using app binary: $APP_BIN"
+          # Try 3: Any .bin not in CMakeFiles, bootloader, or partition dirs
+          if [ -z "$APP_BIN" ] || [ ! -f "$APP_BIN" ]; then
+            APP_BIN=$(find build -name "*.bin" \
+              ! -path "*/CMakeFiles/*" \
+              ! -path "*/bootloader/*" \
+              ! -path "*/partition*" \
+              ! -path "*/CheckTypeSize/*" \
+              ! -path "*/esp_idf_size/*" \
+              2>/dev/null | head -1)
+            echo "Try 3 (deep search): $APP_BIN"
+          fi
 
-          # Bail out early with clear error if any file is missing
+          echo "Final app binary: $APP_BIN"
+
+          # Validate all 3 required files
+          MISSING=0
           if [ ! -f "build/bootloader/bootloader.bin" ]; then
             echo "ERROR: bootloader.bin not found!"
-            exit 1
+            MISSING=1
           fi
           if [ ! -f "build/partition_table/partition-table.bin" ]; then
             echo "ERROR: partition-table.bin not found!"
-            exit 1
+            MISSING=1
           fi
           if [ -z "$APP_BIN" ] || [ ! -f "$APP_BIN" ]; then
             echo "ERROR: app binary not found!"
+            MISSING=1
+          fi
+          if [ "$MISSING" = "1" ]; then
+            echo "=== Full build dir dump for debugging ==="
+            find build -type f | sort
             exit 1
           fi
 
@@ -97,7 +123,7 @@ jobs:
             0x8000 build/partition_table/partition-table.bin \
             0x10000 $APP_BIN
 
-          echo "Merged binary size:"
+          echo "=== Merged binary ==="
           ls -lh 44vba-merged.bin
 
       - name: Upload firmware
@@ -106,8 +132,8 @@ jobs:
           name: 44vba-esp32s3
           path: port-esp32s3/44vba-merged.bin
 
-      - name: Upload build log on failure
-        if: failure()
+      - name: Upload build log always
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: build-log
