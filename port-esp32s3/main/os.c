@@ -1,10 +1,8 @@
-
 #include "os.h"
 
 #include <stdlib.h>
 #include <string.h>
 
-#include "config.h"
 #include "driver/gpio.h"
 #include "driver/sdmmc_host.h"
 #include "driver/spi_master.h"
@@ -18,14 +16,10 @@
 
 void delayMS(int ms) { vTaskDelay(ms / portTICK_PERIOD_MS); }
 
-#define USE_HORIZONTAL 0
 spi_device_handle_t spiDev0;
 
 static void lcdWrite(uint8_t *buf, int len, int isCmd) {
-  if (len <= 0) {
-    return;
-  }
-  gpio_set_level(PIN_LCD_CS, 0);
+  if (len <= 0) return;
   gpio_set_level(PIN_LCD_DC, isCmd ? 0 : 1);
   spi_transaction_t t;
   memset(&t, 0, sizeof(t));
@@ -33,7 +27,6 @@ static void lcdWrite(uint8_t *buf, int len, int isCmd) {
   t.tx_buffer = buf;
   ESP_ERROR_CHECK(spi_device_transmit(spiDev0, &t));
   gpio_set_level(PIN_LCD_DC, 1);
-  gpio_set_level(PIN_LCD_CS, 1);
 }
 
 static void lcdCmd8(uint8_t cmd) { lcdWrite(&cmd, 1, 1); }
@@ -44,61 +37,30 @@ static void lcdDat16(uint16_t dat) {
 }
 
 void lcdSetWindow(uint16_t x1, uint16_t y1, uint16_t x2, uint16_t y2) {
-  if (USE_HORIZONTAL == 0) {
-    lcdCmd8(0x2a);  //列地址设置
-    lcdDat16(x1);
-    lcdDat16(x2);
-    lcdCmd8(0x2b);  //行地址设置
-    lcdDat16(y1);
-    lcdDat16(y2);
-    lcdCmd8(0x2c);  //储存器写
-  } else if (USE_HORIZONTAL == 1) {
-    lcdCmd8(0x2a);  //列地址设置
-    lcdDat16(x1);
-    lcdDat16(x2);
-    lcdCmd8(0x2b);  //行地址设置
-    lcdDat16(y1 + 80);
-    lcdDat16(y2 + 80);
-    lcdCmd8(0x2c);  //储存器写
-  } else if (USE_HORIZONTAL == 2) {
-    lcdCmd8(0x2a);  //列地址设置
-    lcdDat16(x1);
-    lcdDat16(x2);
-    lcdCmd8(0x2b);  //行地址设置
-    lcdDat16(y1);
-    lcdDat16(y2);
-    lcdCmd8(0x2c);  //储存器写
-  } else {
-    lcdCmd8(0x2a);  //列地址设置
-    lcdDat16(x1 + 80);
-    lcdDat16(x2 + 80);
-    lcdCmd8(0x2b);  //行地址设置
-    lcdDat16(y1);
-    lcdDat16(y2);
-    lcdCmd8(0x2c);  //储存器写
-  }
+  lcdCmd8(0x2A);
+  lcdDat16(x1);
+  lcdDat16(x2);
+  lcdCmd8(0x2B);
+  lcdDat16(y1);
+  lcdDat16(y2);
+  lcdCmd8(0x2C);
 }
 
 void lcdWriteFB(uint8_t *buf, int len) {
-  if (len <= 0) {
-    return;
-  }
-  const int maxLen = 240 * 60*2;
-  while(len > 0) {
+  if (len <= 0) return;
+  const int maxLen = 240 * 60 * 2;
+  while (len > 0) {
     int writeLen = len > maxLen ? maxLen : len;
-    lcdWrite((uint8_t *)buf, writeLen, 0);
+    lcdWrite(buf, writeLen, 0);
     buf += writeLen;
     len -= writeLen;
   }
-  
 }
 
 void lcdInit() {
-  // Backlight on
   gpio_set_direction(PIN_LCD_BCKL, GPIO_MODE_OUTPUT);
   gpio_set_level(PIN_LCD_BCKL, 1);
 
-  // Reset
   gpio_set_direction(PIN_SYS_RSTN, GPIO_MODE_OUTPUT);
   gpio_set_level(PIN_SYS_RSTN, 0);
   delayMS(100);
@@ -126,9 +88,8 @@ void lcdInit() {
   };
   ESP_ERROR_CHECK(spi_bus_add_device(SPI2_HOST, &devcfg, &spiDev0));
 
-  // ILI9341 init sequence
-  lcdCmd8(0x01); delayMS(50);   // Software reset
-  lcdCmd8(0x11); delayMS(120);  // Sleep out
+  lcdCmd8(0x01); delayMS(50);
+  lcdCmd8(0x11); delayMS(120);
 
   lcdCmd8(0xCF); lcdDat8(0x00); lcdDat8(0xC3); lcdDat8(0x30);
   lcdCmd8(0xED); lcdDat8(0x64); lcdDat8(0x03); lcdDat8(0x12); lcdDat8(0x81);
@@ -140,7 +101,7 @@ void lcdInit() {
   lcdCmd8(0xC1); lcdDat8(0x12);
   lcdCmd8(0xC5); lcdDat8(0x32); lcdDat8(0x3C);
   lcdCmd8(0xC7); lcdDat8(0x91);
-  lcdCmd8(0x36); lcdDat8(0x08);
+  lcdCmd8(0x36); lcdDat8(0x48);
   lcdCmd8(0x3A); lcdDat8(0x55);
   lcdCmd8(0xB1); lcdDat8(0x00); lcdDat8(0x10);
   lcdCmd8(0xB6); lcdDat8(0x0A); lcdDat8(0xA2);
@@ -157,13 +118,11 @@ void lcdInit() {
     lcdDat8(0x48); lcdDat8(0x08); lcdDat8(0x0F); lcdDat8(0x0C);
     lcdDat8(0x31); lcdDat8(0x36); lcdDat8(0x0F);
   lcdCmd8(0x11); delayMS(120);
-  lcdCmd8(0x29); // Display on
+  lcdCmd8(0x29);
 }
 
-
-
-// "a", "b", "select", "start", "right", "left", "up", "down", "r", "l", "turbo", "menu"
 int osKeyMap[12] = {PIN_KEY_A, PIN_KEY_B, PIN_KEY_SELECT, PIN_KEY_START, PIN_KEY_RIGHT, PIN_KEY_LEFT, PIN_KEY_UP, PIN_KEY_DOWN, -1, -1, -1, -1};
+
 uint32_t osReadKey() {
   uint32_t ret = 0;
   for (int i = 0; i < 12; i++) {
@@ -176,17 +135,13 @@ uint32_t osReadKey() {
   return ret;
 }
 
-
-
 void osInit() {
   lcdInit();
   for (int i = 0; i < 12; i++) {
     int pin = osKeyMap[i];
     if (pin != -1) {
-      // Set the GPIO as a input, pullup
       gpio_set_direction(pin, GPIO_MODE_INPUT);
       gpio_pullup_en(pin);
-      // disable pulldown
       gpio_pulldown_dis(pin);
     }
   }
