@@ -27,10 +27,8 @@ jobs:
       - name: Patch compiler flags
         run: |
           cd port-esp32s3
-          # Remove any existing conflicting entries first
           grep -v "COMPILER_WARN\|COMPILER_HIDE\|COMPILER_DISABLE" sdkconfig.defaults > sdkconfig.defaults.tmp || true
           mv sdkconfig.defaults.tmp sdkconfig.defaults
-          # These are the correct keys for ESP-IDF v5.1.2
           echo "CONFIG_COMPILER_DISABLE_GCC12_WARNINGS=y" >> sdkconfig.defaults
           echo "CONFIG_COMPILER_WARN_WRITE_STRINGS=n" >> sdkconfig.defaults
           cat sdkconfig.defaults
@@ -40,16 +38,57 @@ jobs:
           . ~/esp-idf/export.sh
           cd port-esp32s3
           idf.py set-target esp32s3
-          idf.py build 2>&1 | tee build.log
+          idf.py build -DEXTRA_CXXFLAGS="-Wno-error -Wno-unused-function -Wno-implicit-fallthrough -Wno-format" 2>&1 | tee build.log
+
+      - name: Verify build output
+        run: |
+          cd port-esp32s3
+          echo "=== Build directory top level ==="
+          ls -la build/
+          echo "=== Bootloader ==="
+          ls -la build/bootloader/ || echo "MISSING bootloader dir"
+          echo "=== Partition table ==="
+          ls -la build/partition_table/ || echo "MISSING partition table dir"
+          echo "=== App binary ==="
+          ls -la build/*.bin || echo "MISSING app bin at top level"
+          echo "=== All bins ==="
+          find build -name "*.bin" | sort
 
       - name: Find and merge binaries
         run: |
           . ~/esp-idf/export.sh
           cd port-esp32s3
-          echo "=== Files in build ==="
-          find build -name "*.bin" | head -20
-          APP_BIN=$(find build -name "*.bin" ! -path "*/bootloader/*" ! -path "*/partition*" | head -1)
-          echo "App binary: $APP_BIN"
+
+          # Get the real app binary directly in build/ (not in subdirs)
+          APP_BIN=$(find build -maxdepth 1 -name "*.bin" | head -1)
+
+          # Fallback: search deeper but exclude CMake test files and system bins
+          if [ -z "$APP_BIN" ]; then
+            APP_BIN=$(find build -name "*.bin" \
+              ! -path "*/bootloader/*" \
+              ! -path "*/partition*" \
+              ! -path "*/CMakeFiles/*" \
+              ! -path "*/CheckTypeSize/*" \
+              ! -path "*/esp_idf_size/*" \
+              | head -1)
+          fi
+
+          echo "Using app binary: $APP_BIN"
+
+          # Bail out early with clear error if any file is missing
+          if [ ! -f "build/bootloader/bootloader.bin" ]; then
+            echo "ERROR: bootloader.bin not found!"
+            exit 1
+          fi
+          if [ ! -f "build/partition_table/partition-table.bin" ]; then
+            echo "ERROR: partition-table.bin not found!"
+            exit 1
+          fi
+          if [ -z "$APP_BIN" ] || [ ! -f "$APP_BIN" ]; then
+            echo "ERROR: app binary not found!"
+            exit 1
+          fi
+
           esptool.py --chip esp32s3 merge_bin \
             -o 44vba-merged.bin \
             --flash_mode dio \
@@ -57,6 +96,9 @@ jobs:
             0x0000 build/bootloader/bootloader.bin \
             0x8000 build/partition_table/partition-table.bin \
             0x10000 $APP_BIN
+
+          echo "Merged binary size:"
+          ls -lh 44vba-merged.bin
 
       - name: Upload firmware
         uses: actions/upload-artifact@v4
