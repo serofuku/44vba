@@ -41,6 +41,9 @@ jobs:
           echo "CONFIG_COMPILER_DISABLE_GCC12_WARNINGS=y" >> sdkconfig.defaults
           echo "CONFIG_COMPILER_WARNINGS_AS_ERRORS=n" >> sdkconfig.defaults
           echo "CONFIG_COMPILER_WARN_WRITE_STRINGS=n" >> sdkconfig.defaults
+          echo "CONFIG_PARTITION_TABLE_CUSTOM=y" >> sdkconfig.defaults
+          echo "CONFIG_PARTITION_TABLE_CUSTOM_FILENAME=\"partitions.csv\"" >> sdkconfig.defaults
+          echo "CONFIG_PARTITION_TABLE_OFFSET=0x8000" >> sdkconfig.defaults
           sed -i 's/ -Werror / /g' CMakeLists.txt
           sed -i 's/ -Werror$//g' CMakeLists.txt
           sed -i 's/"-Werror"//g' CMakeLists.txt
