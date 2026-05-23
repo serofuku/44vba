@@ -32,12 +32,23 @@ jobs:
           idf.py set-target esp32s3
           idf.py build 2>&1 | tee build.log
 
+      - name: Merge binaries
+        run: |
+          . ~/esp-idf/export.sh
+          cd port-esp32s3
+          esptool.py --chip esp32s3 merge_bin \
+            -o 44vba-merged.bin \
+            --flash_mode dio \
+            --flash_size 8MB \
+            0x0000 build/bootloader/bootloader.bin \
+            0x8000 build/partition_table/partition-table.bin \
+            0x10000 build/44vba.bin
+
       - name: Upload firmware
         uses: actions/upload-artifact@v4
         with:
           name: 44vba-esp32s3
-          path: port-esp32s3/build/
-          if-no-files-found: warn
+          path: port-esp32s3/44vba-merged.bin
 
       - name: Upload build log on failure
         if: failure()
