@@ -37,9 +37,9 @@ static uint16_t *FB_back  = NULL;
 static SemaphoreHandle_t frameSemaphore = NULL;
 static SemaphoreHandle_t bufferMutex    = NULL;
 
-static int       frameDrawn       = 0;
-static uint32_t  frameCount       = 0;
-static int       frameskipCounter = 0;
+static int      frameDrawn       = 0;
+static uint32_t frameCount       = 0;
+static int      frameskipCounter = 0;
 
 // ─── GBA callbacks ────────────────────────────────────────────────────────────
 
@@ -107,8 +107,9 @@ void emuRunFrame() {
 // ─── Core 1: Emulator task ────────────────────────────────────────────────────
 
 static void emuTask(void *arg) {
-    // Remove this task from watchdog monitoring
-    esp_task_wdt_delete(NULL);
+    // Remove from watchdog — emulator intentionally monopolizes Core 1
+    esp_err_t wdt_ret = esp_task_wdt_delete(NULL);
+    (void)wdt_ret;  // ignore error if not registered
 
     TickType_t fpsTick = xTaskGetTickCount();
 
@@ -125,7 +126,6 @@ static void emuTask(void *arg) {
             printf("FPS: %d\n", fps);
         }
 
-        // Yield to let idle task run
         taskYIELD();
     }
 }
@@ -171,9 +171,14 @@ extern "C" void app_main() {
     memset(FB_front, 0, 240 * 160 * sizeof(uint16_t));
     memset(FB_back,  0, 240 * 160 * sizeof(uint16_t));
 
-    // Clear display on boot
-    lcdSetWindow(0, 0, LCD_W - 1, LCD_H - 1);
-    lcdWriteFB((uint8_t *)FB_front, 240 * 160 * sizeof(uint16_t));
+    // Clear full display on boot
+    uint16_t *clearBuf = (uint16_t *)heap_caps_malloc(LCD_W * LCD_H * 2, MALLOC_CAP_SPIRAM);
+    if (clearBuf) {
+        memset(clearBuf, 0, LCD_W * LCD_H * 2);
+        lcdSetWindow(0, 0, LCD_W - 1, LCD_H - 1);
+        lcdWriteFB((uint8_t *)clearBuf, LCD_W * LCD_H * 2);
+        free(clearBuf);
+    }
 
     // Allocate GBA buffers in PSRAM
     vram              = (uint8_t *)  heap_caps_malloc(0x20000,          MALLOC_CAP_SPIRAM);
