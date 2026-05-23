@@ -30,7 +30,7 @@ jobs:
           . ~/esp-idf/export.sh
           cd port-esp32s3
           idf.py set-target esp32s3
-          idf.py build
+          idf.py build -DCMAKE_C_FLAGS="-w" -DCMAKE_CXX_FLAGS="-w"
 
       - name: Find and merge binaries
         run: |
