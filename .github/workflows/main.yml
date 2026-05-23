@@ -55,6 +55,13 @@ jobs:
           sed -i 's/sscanf(buffer, "%x", &address)/sscanf(buffer, "%lx", \&address)/g' "$GBA_CPP"
           sed -i 's/sscanf(buffer, "%x", &value)/sscanf(buffer, "%lx", \&value)/g' "$GBA_CPP"
 
+      - name: Show partitions
+        run: |
+          echo "=== partitions.csv ==="
+          cat port-esp32s3/partitions.csv
+          echo "=== sdkconfig.defaults ==="
+          cat port-esp32s3/sdkconfig.defaults
+
       - name: Build
         run: |
           . ~/esp-idf/export.sh
