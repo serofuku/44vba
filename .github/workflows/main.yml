@@ -24,11 +24,14 @@ jobs:
           cd ~/esp-idf
           ./install.sh esp32s3
 
-      - name: Fix main.cpp API compatibility
-        run: |
+          - name: Fix main.cpp API compatibility
+          run: |
           cd port-esp32s3/main
           sed -i '1s/^/#include "spi_flash_mmap.h"\n/' main.cpp
-
+          sed -i 's/SPI_FLASH_MMAP_DATA/ESP_PARTITION_MMAP_DATA/g' main.cpp
+          sed -i 's/spi_flash_mmap_memory_t/esp_partition_mmap_memory_t/g' main.cpp
+          sed -i 's/spi_flash_mmap_handle_t/esp_partition_mmap_handle_t/g' main.cpp
+     
       - name: Patch project files
         run: |
           cd port-esp32s3
