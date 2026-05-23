@@ -55,7 +55,7 @@ void systemDrawScreen(void) {
         }
         src += 16;
     }
-    lcdSetWindow(0, 0, 239, 159);
+    lcdSetWindow(0, 80, 239, 239);
     lcdWriteFB((uint8_t*)FB, 240 * 160 * 2);
 }
 
