@@ -4,7 +4,6 @@ idf_component_register(
     "../../../src/memory.cpp"
     "../../../src/sound.cpp"
     "../../../src/system.cpp"
-    "../../../src/thread.c"
   INCLUDE_DIRS
     "."
     "../../../src"
@@ -22,12 +21,12 @@ target_compile_options(${COMPONENT_LIB} PRIVATE
   -fno-strict-aliasing
   -fno-exceptions
   -fno-rtti
+  -Wno-volatile
   -DFRONTEND_SUPPORTS_RGB565
   -DHAVE_STDINT_H
   "-DINLINE=inline __attribute__((always_inline))"
   -DLSB_FIRST
   -DUSE_FRAME_SKIP
   -DUSE_TWEAKS=1
-  -DTHREADED_RENDERER=1
   -DDISABLE_SOUND=1
 )
