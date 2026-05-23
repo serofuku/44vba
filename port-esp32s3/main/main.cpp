@@ -93,7 +93,6 @@ void emuInit() {
     CPUInit(NULL, false);
     CPUReset();
     SetFrameskip(1);
-    ThreadedRendererStart();
 }
 
 extern "C" void app_main() {
