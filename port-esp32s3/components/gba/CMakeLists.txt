@@ -18,10 +18,13 @@ target_compile_options(${COMPONENT_LIB} PRIVATE
   -funroll-loops
   -fomit-frame-pointer
   -finline-functions
+  -finline-limit=1000
   -fno-strict-aliasing
+  -fno-exceptions
+  -fno-rtti
   -DFRONTEND_SUPPORTS_RGB565
   -DHAVE_STDINT_H
-  -DINLINE=inline
+  "-DINLINE=inline __attribute__((always_inline))"
   -DLSB_FIRST
   -DUSE_FRAME_SKIP
   -DUSE_TWEAKS=1
