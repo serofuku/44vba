@@ -38,151 +38,52 @@ jobs:
           cat sdkconfig.defaults
 
           echo "=== Patching CMakeLists.txt ==="
-          # Safe removal of -Werror only as standalone flag
           sed -i 's/ -Werror / /g' CMakeLists.txt
           sed -i 's/ -Werror$//g' CMakeLists.txt
           sed -i 's/"-Werror"//g' CMakeLists.txt
-
-          # Add flags after cmake_minimum_required
           if ! grep -q "Wno-error" CMakeLists.txt; then
             sed -i '/cmake_minimum_required/a add_compile_options(-Wno-error -Wno-unused-but-set-variable -Wno-unused-function -Wno-implicit-fallthrough -Wno-format)' CMakeLists.txt
           fi
-
-          echo "=== Final CMakeLists.txt ==="
           cat CMakeLists.txt
 
-      - name: Patch gba.cpp compiler flags directly
-        run: |
-          cd port-esp32s3
-
-          # Find the component CMakeLists that compiles gba.cpp
-          echo "=== Looking for gba component cmake ==="
-          find . -name "CMakeLists.txt" | xargs grep -l "gba" 2>/dev/null
-
-          # Add per-file compile flags to suppress errors in gba.cpp
-          GBA_CMAKE=$(find . -name "CMakeLists.txt" | xargs grep -l "gba.cpp" 2>/dev/null | head -1)
-          if [ -n "$GBA_CMAKE" ]; then
-            echo "Found: $GBA_CMAKE"
-            cat "$GBA_CMAKE"
-            # Add set_source_files_properties after the file
-            echo '' >> "$GBA_CMAKE"
-            echo 'set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/../../src/gba.cpp PROPERTIES COMPILE_FLAGS "-Wno-error -Wno-unused-but-set-variable -Wno-unused-function -Wno-implicit-fallthrough -Wno-format")' >> "$GBA_CMAKE"
-            echo "=== Patched $GBA_CMAKE ==="
-            cat "$GBA_CMAKE"
-          else
-            echo "gba.cpp not found in any CMakeLists.txt, will rely on global flags"
-          fi
-
-      - name: Build
+      - name: Build and capture full error
         run: |
           . ~/esp-idf/export.sh
           cd port-esp32s3
           idf.py set-target esp32s3
 
-          # Pass warning flags directly to ninja via environment
           export CXXFLAGS="-Wno-error -Wno-unused-but-set-variable -Wno-unused-function -Wno-implicit-fallthrough -Wno-format"
           export CFLAGS="-Wno-error -Wno-unused-but-set-variable -Wno-unused-function -Wno-implicit-fallthrough -Wno-format"
 
-          idf.py build 2>&1 | tee build.log
+          idf.py build 2>&1 | tee build.log || true
 
-          BUILD_EXIT=${PIPESTATUS[0]}
-          echo "=== Last 100 lines ==="
-          tail -100 build.log
-          exit $BUILD_EXIT
+          echo "=== FULL gba.cpp ERROR from ninja stderr log ==="
+          # Read the actual ninja error log that contains the real compiler error
+          STDERR_LOG=$(find build/log -name "idf_py_stderr_output_*" | sort | tail -1)
+          STDOUT_LOG=$(find build/log -name "idf_py_stdout_output_*" | sort | tail -1)
 
-      - name: Verify build output
-        if: always()
-        run: |
-          cd port-esp32s3
-          echo "=== Top level build ==="
-          ls -la build/ || echo "NO BUILD DIR"
-          echo "=== .bin files ==="
-          find build -name "*.bin" | sort
-          echo "=== .elf files ==="
-          find build -name "*.elf" | sort
-          echo "=== Bootloader ==="
-          ls -la build/bootloader/ || echo "MISSING"
-          echo "=== Partition table ==="
-          ls -la build/partition_table/ || echo "MISSING"
+          echo "--- stderr log: $STDERR_LOG ---"
+          cat "$STDERR_LOG" || echo "not found"
 
-      - name: Find and merge binaries
-        run: |
-          . ~/esp-idf/export.sh
-          cd port-esp32s3
+          echo "--- stdout log: $STDOUT_LOG ---"
+          cat "$STDOUT_LOG" || echo "not found"
 
-          APP_BIN=""
+          echo "=== ninja build log ==="
+          cat build/.ninja_log 2>/dev/null | tail -20 || echo "no ninja log"
 
-          # Try 1: Known project names directly in build/
-          for NAME in esp32s3 44vba vba gba main app port-esp32s3; do
-            if [ -f "build/${NAME}.bin" ]; then
-              APP_BIN="build/${NAME}.bin"
-              echo "Found by name: $APP_BIN"
-              break
-            fi
+          echo "=== CMakeFiles error log ==="
+          find build -name "CMakeError.log" | while read f; do
+            echo "--- $f ---"
+            cat "$f"
           done
 
-          # Try 2: Any .bin directly in build/ root
-          if [ -z "$APP_BIN" ]; then
-            APP_BIN=$(find build -maxdepth 1 -name "*.bin" 2>/dev/null | head -1)
-            [ -n "$APP_BIN" ] && echo "Found at root: $APP_BIN"
-          fi
+          exit 1
 
-          # Try 3: Find .elf and convert to .bin
-          if [ -z "$APP_BIN" ]; then
-            ELF=$(find build -maxdepth 1 -name "*.elf" 2>/dev/null | head -1)
-            if [ -n "$ELF" ]; then
-              APP_BIN="${ELF%.elf}.bin"
-              echo "Converting ELF to BIN: $ELF -> $APP_BIN"
-              esptool.py --chip esp32s3 elf2image --output "$APP_BIN" "$ELF"
-            fi
-          fi
-
-          # Try 4: Deep search excluding system dirs
-          if [ -z "$APP_BIN" ] || [ ! -f "$APP_BIN" ]; then
-            APP_BIN=$(find build -name "*.bin" \
-              ! -path "*/CMakeFiles/*" \
-              ! -path "*/bootloader/*" \
-              ! -path "*/partition*" \
-              ! -path "*/CheckTypeSize/*" \
-              ! -path "*/esp_idf_size/*" \
-              2>/dev/null | head -1)
-            [ -n "$APP_BIN" ] && echo "Found by deep search: $APP_BIN"
-          fi
-
-          echo "=== Final app binary: $APP_BIN ==="
-
-          MISSING=0
-          [ ! -f "build/bootloader/bootloader.bin" ] && echo "ERROR: bootloader.bin missing!" && MISSING=1
-          [ ! -f "build/partition_table/partition-table.bin" ] && echo "ERROR: partition-table.bin missing!" && MISSING=1
-          { [ -z "$APP_BIN" ] || [ ! -f "$APP_BIN" ]; } && echo "ERROR: app binary missing!" && MISSING=1
-
-          if [ "$MISSING" = "1" ]; then
-            echo "=== Full build dir dump ==="
-            find build -type f | sort
-            exit 1
-          fi
-
-          esptool.py --chip esp32s3 merge_bin \
-            -o 44vba-merged.bin \
-            --flash_mode dio \
-            --flash_size 8MB \
-            0x0000 build/bootloader/bootloader.bin \
-            0x8000 build/partition_table/partition-table.bin \
-            0x10000 $APP_BIN
-
-          echo "=== Merged binary ==="
-          ls -lh 44vba-merged.bin
-
-      - name: Upload firmware
-        if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: 44vba-esp32s3
-          path: port-esp32s3/44vba-merged.bin
-
-      - name: Upload build log
+      - name: Upload all logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: build-log
-          path: port-esp32s3/build.log
+          name: build-logs
+          path: |
+            port-esp32s3/build.log
+            port-esp32s3/build/log/
