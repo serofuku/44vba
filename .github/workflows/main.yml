@@ -1,5 +1,4 @@
 name: Build 44VBA ESP32-S3
-
 on:
   push:
     branches: [ main ]
@@ -28,15 +27,20 @@ jobs:
       - name: Patch compiler flags
         run: |
           cd port-esp32s3
-          echo "CONFIG_COMPILER_WARNINGS_AS_ERRORS=n" >> sdkconfig.defaults
-          echo "CONFIG_COMPILER_HIDE_WARNINGS=y" >> sdkconfig.defaults
+          # Remove any existing conflicting entries first
+          grep -v "COMPILER_WARN\|COMPILER_HIDE\|COMPILER_DISABLE" sdkconfig.defaults > sdkconfig.defaults.tmp || true
+          mv sdkconfig.defaults.tmp sdkconfig.defaults
+          # These are the correct keys for ESP-IDF v5.1.2
+          echo "CONFIG_COMPILER_DISABLE_GCC12_WARNINGS=y" >> sdkconfig.defaults
+          echo "CONFIG_COMPILER_WARN_WRITE_STRINGS=n" >> sdkconfig.defaults
+          cat sdkconfig.defaults
 
       - name: Build
         run: |
           . ~/esp-idf/export.sh
           cd port-esp32s3
           idf.py set-target esp32s3
-          idf.py build
+          idf.py build 2>&1 | tee build.log
 
       - name: Find and merge binaries
         run: |
