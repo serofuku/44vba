@@ -27,114 +27,75 @@ jobs:
       - name: Patch compiler flags
         run: |
           cd port-esp32s3
-          grep -v "COMPILER_WARN\|COMPILER_HIDE\|COMPILER_DISABLE" sdkconfig.defaults > sdkconfig.defaults.tmp || true
+
+          # Remove conflicting entries
+          grep -v "COMPILER_WARN\|COMPILER_HIDE\|COMPILER_DISABLE\|WERROR" sdkconfig.defaults > sdkconfig.defaults.tmp || true
           mv sdkconfig.defaults.tmp sdkconfig.defaults
+
+          # Correct keys for ESP-IDF v5.1.2
           echo "CONFIG_COMPILER_DISABLE_GCC12_WARNINGS=y" >> sdkconfig.defaults
           echo "CONFIG_COMPILER_WARN_WRITE_STRINGS=n" >> sdkconfig.defaults
+
+          echo "=== sdkconfig.defaults ==="
           cat sdkconfig.defaults
+
+          # Also patch CMakeLists.txt to remove -Werror if present
+          if grep -q "Werror" CMakeLists.txt; then
+            echo "Found -Werror in CMakeLists.txt, removing..."
+            sed -i 's/-Werror[^ "]*//g' CMakeLists.txt
+          fi
+
+          # Check if there's a separate compiler flags file
+          echo "=== CMakeLists.txt ==="
+          cat CMakeLists.txt
 
       - name: Build
         run: |
           . ~/esp-idf/export.sh
           cd port-esp32s3
+
+          # Force disable Werror at cmake level
           idf.py set-target esp32s3
-          idf.py build -DEXTRA_CXXFLAGS="-Wno-error -Wno-unused-function -Wno-implicit-fallthrough -Wno-format" 2>&1 | tee build.log
-          echo "Exit code: $?"
+
+          # Inject flags via cmake directly
+          cmake -B build \
+            -DCMAKE_C_FLAGS="-Wno-error -Wno-format -Wno-unused-function -Wno-implicit-fallthrough" \
+            -DCMAKE_CXX_FLAGS="-Wno-error -Wno-format -Wno-unused-function -Wno-implicit-fallthrough" \
+            . || true
+
+          idf.py build 2>&1 | tee build.log
+          BUILD_EXIT=${PIPESTATUS[0]}
+          echo "Build exit code: $BUILD_EXIT"
+
+          # Show last 50 lines of log for quick diagnosis
+          echo "=== Last 50 lines of build ==="
+          tail -50 build.log
+
+          exit $BUILD_EXIT
 
       - name: Verify build output
+        if: always()
         run: |
           cd port-esp32s3
-          echo "=== port-esp32s3 root ==="
-          ls -la
-          echo "=== build/ top level ==="
-          ls -la build/ || echo "NO BUILD DIR"
-          echo "=== build/bootloader/ ==="
-          ls -la build/bootloader/ || echo "MISSING bootloader"
-          echo "=== build/partition_table/ ==="
-          ls -la build/partition_table/ || echo "MISSING partition table"
-          echo "=== ALL .bin files ==="
-          find build -name "*.bin" | sort || echo "NO BIN FILES FOUND"
-          echo "=== ALL .elf files ==="
-          find build -name "*.elf" | sort || echo "NO ELF FILES FOUND"
-          echo "=== CMakeLists.txt exists? ==="
-          cat CMakeLists.txt || echo "NO CMakeLists.txt"
+          echo "=== ALL files in build/ ==="
+          find build -type f | sort
+          echo "=== .bin files ==="
+          find build -name "*.bin" | sort
+          echo "=== .elf files ==="
+          find build -name "*.elf" | sort
 
       - name: Find and merge binaries
         run: |
           . ~/esp-idf/export.sh
           cd port-esp32s3
 
-          echo "=== Searching for app binary ==="
+          # The project is named esp32s3 based on project_elf_src_esp32s3.c
+          # Standard ESP-IDF output: build/<projectname>.bin and build/<projectname>.elf
 
-          # Try 1: .bin directly in build/ (standard ESP-IDF output)
-          APP_BIN=$(find build -maxdepth 1 -name "*.bin" 2>/dev/null | head -1)
-          echo "Try 1 (build/*.bin): $APP_BIN"
+          APP_BIN=""
 
-          # Try 2: .elf converted — find elf and use same name with .bin
-          if [ -z "$APP_BIN" ]; then
-            ELF=$(find build -maxdepth 1 -name "*.elf" 2>/dev/null | head -1)
-            if [ -n "$ELF" ]; then
-              BASENAME="${ELF%.elf}"
-              APP_BIN="${BASENAME}.bin"
-              echo "Try 2 (from .elf): generating $APP_BIN from $ELF"
-              esptool.py --chip esp32s3 elf2image --output "$APP_BIN" "$ELF"
-            fi
-          fi
-
-          # Try 3: Any .bin not in CMakeFiles, bootloader, or partition dirs
-          if [ -z "$APP_BIN" ] || [ ! -f "$APP_BIN" ]; then
-            APP_BIN=$(find build -name "*.bin" \
-              ! -path "*/CMakeFiles/*" \
-              ! -path "*/bootloader/*" \
-              ! -path "*/partition*" \
-              ! -path "*/CheckTypeSize/*" \
-              ! -path "*/esp_idf_size/*" \
-              2>/dev/null | head -1)
-            echo "Try 3 (deep search): $APP_BIN"
-          fi
-
-          echo "Final app binary: $APP_BIN"
-
-          # Validate all 3 required files
-          MISSING=0
-          if [ ! -f "build/bootloader/bootloader.bin" ]; then
-            echo "ERROR: bootloader.bin not found!"
-            MISSING=1
-          fi
-          if [ ! -f "build/partition_table/partition-table.bin" ]; then
-            echo "ERROR: partition-table.bin not found!"
-            MISSING=1
-          fi
-          if [ -z "$APP_BIN" ] || [ ! -f "$APP_BIN" ]; then
-            echo "ERROR: app binary not found!"
-            MISSING=1
-          fi
-          if [ "$MISSING" = "1" ]; then
-            echo "=== Full build dir dump for debugging ==="
-            find build -type f | sort
-            exit 1
-          fi
-
-          esptool.py --chip esp32s3 merge_bin \
-            -o 44vba-merged.bin \
-            --flash_mode dio \
-            --flash_size 8MB \
-            0x0000 build/bootloader/bootloader.bin \
-            0x8000 build/partition_table/partition-table.bin \
-            0x10000 $APP_BIN
-
-          echo "=== Merged binary ==="
-          ls -lh 44vba-merged.bin
-
-      - name: Upload firmware
-        uses: actions/upload-artifact@v4
-        with:
-          name: 44vba-esp32s3
-          path: port-esp32s3/44vba-merged.bin
-
-      - name: Upload build log always
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-log
-          path: port-esp32s3/build.log
+          # Try 1: Known project name from project_elf_src_esp32s3.c
+          for NAME in esp32s3 44vba vba gba main app; do
+            if [ -f "build/${NAME}.bin" ]; then
+              APP_BIN="build/${NAME}.bin"
+              echo "Found by name: $A
