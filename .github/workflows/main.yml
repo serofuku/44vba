@@ -25,12 +25,18 @@ jobs:
           cd ~/esp-idf
           ./install.sh esp32s3
 
+      - name: Patch compiler flags
+        run: |
+          cd port-esp32s3
+          echo "CONFIG_COMPILER_WARNINGS_AS_ERRORS=n" >> sdkconfig.defaults
+          echo "CONFIG_COMPILER_HIDE_WARNINGS=y" >> sdkconfig.defaults
+
       - name: Build
         run: |
           . ~/esp-idf/export.sh
           cd port-esp32s3
           idf.py set-target esp32s3
-          idf.py build -DCMAKE_C_FLAGS="-w" -DCMAKE_CXX_FLAGS="-w"
+          idf.py build
 
       - name: Find and merge binaries
         run: |
