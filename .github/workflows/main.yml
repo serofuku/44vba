@@ -24,6 +24,19 @@ jobs:
           cd ~/esp-idf
           ./install.sh esp32s3
 
+      - name: Fix main.cpp API compatibility
+        run: |
+          cd port-esp32s3/main
+          echo "=== Original main.cpp head ==="
+          head -20 main.cpp
+
+          # Add missing include for spi_flash_mmap_handle_t and SPI_FLASH_MMAP_DATA
+          # These moved to esp_flash.h / spi_flash_mmap.h in ESP-IDF v5
+          sed -i '1s/^/#include "spi_flash_mmap.h"\n/' main.cpp
+
+          echo "=== Fixed main.cpp head ==="
+          head -20 main.cpp
+
       - name: Patch project files
         run: |
           cd port-esp32s3
@@ -46,44 +59,84 @@ jobs:
           fi
           cat CMakeLists.txt
 
-      - name: Build and capture full error
+      - name: Build
         run: |
           . ~/esp-idf/export.sh
           cd port-esp32s3
           idf.py set-target esp32s3
+          idf.py build 2>&1 | tee build.log
+          BUILD_EXIT=${PIPESTATUS[0]}
+          tail -50 build.log
+          exit $BUILD_EXIT
 
-          export CXXFLAGS="-Wno-error -Wno-unused-but-set-variable -Wno-unused-function -Wno-implicit-fallthrough -Wno-format"
-          export CFLAGS="-Wno-error -Wno-unused-but-set-variable -Wno-unused-function -Wno-implicit-fallthrough -Wno-format"
+      - name: Verify build output
+        if: always()
+        run: |
+          cd port-esp32s3
+          echo "=== .bin files ==="
+          find build -name "*.bin" | sort
+          echo "=== .elf files ==="
+          find build -name "*.elf" | sort
 
-          idf.py build 2>&1 | tee build.log || true
+      - name: Find and merge binaries
+        run: |
+          . ~/esp-idf/export.sh
+          cd port-esp32s3
 
-          echo "=== FULL gba.cpp ERROR from ninja stderr log ==="
-          # Read the actual ninja error log that contains the real compiler error
-          STDERR_LOG=$(find build/log -name "idf_py_stderr_output_*" | sort | tail -1)
-          STDOUT_LOG=$(find build/log -name "idf_py_stdout_output_*" | sort | tail -1)
-
-          echo "--- stderr log: $STDERR_LOG ---"
-          cat "$STDERR_LOG" || echo "not found"
-
-          echo "--- stdout log: $STDOUT_LOG ---"
-          cat "$STDOUT_LOG" || echo "not found"
-
-          echo "=== ninja build log ==="
-          cat build/.ninja_log 2>/dev/null | tail -20 || echo "no ninja log"
-
-          echo "=== CMakeFiles error log ==="
-          find build -name "CMakeError.log" | while read f; do
-            echo "--- $f ---"
-            cat "$f"
+          APP_BIN=""
+          for NAME in esp32s3 44vba vba gba main app port-esp32s3; do
+            if [ -f "build/${NAME}.bin" ]; then
+              APP_BIN="build/${NAME}.bin"
+              break
+            fi
           done
+          if [ -z "$APP_BIN" ]; then
+            APP_BIN=$(find build -maxdepth 1 -name "*.bin" 2>/dev/null | head -1)
+          fi
+          if [ -z "$APP_BIN" ]; then
+            ELF=$(find build -maxdepth 1 -name "*.elf" 2>/dev/null | head -1)
+            if [ -n "$ELF" ]; then
+              APP_BIN="${ELF%.elf}.bin"
+              esptool.py --chip esp32s3 elf2image --output "$APP_BIN" "$ELF"
+            fi
+          fi
+          if [ -z "$APP_BIN" ] || [ ! -f "$APP_BIN" ]; then
+            APP_BIN=$(find build -name "*.bin" \
+              ! -path "*/CMakeFiles/*" \
+              ! -path "*/bootloader/*" \
+              ! -path "*/partition*" \
+              ! -path "*/CheckTypeSize/*" \
+              2>/dev/null | head -1)
+          fi
 
-          exit 1
+          echo "App binary: $APP_BIN"
 
-      - name: Upload all logs
+          MISSING=0
+          [ ! -f "build/bootloader/bootloader.bin" ] && echo "ERROR: bootloader missing!" && MISSING=1
+          [ ! -f "build/partition_table/partition-table.bin" ] && echo "ERROR: partition table missing!" && MISSING=1
+          { [ -z "$APP_BIN" ] || [ ! -f "$APP_BIN" ]; } && echo "ERROR: app binary missing!" && MISSING=1
+          [ "$MISSING" = "1" ] && find build -type f | sort && exit 1
+
+          esptool.py --chip esp32s3 merge_bin \
+            -o 44vba-merged.bin \
+            --flash_mode dio \
+            --flash_size 8MB \
+            0x0000 build/bootloader/bootloader.bin \
+            0x8000 build/partition_table/partition-table.bin \
+            0x10000 $APP_BIN
+
+          ls -lh 44vba-merged.bin
+
+      - name: Upload firmware
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: 44vba-esp32s3
+          path: port-esp32s3/44vba-merged.bin
+
+      - name: Upload build log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: build-logs
-          path: |
-            port-esp32s3/build.log
-            port-esp32s3/build/log/
+          name: build-log
+          path: port-esp32s3/build.log
