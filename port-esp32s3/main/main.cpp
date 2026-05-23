@@ -12,36 +12,37 @@
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_wifi.h"
-#include "esp_pm.h"
-#include "esp_task_wdt.h"
 #include "os.h"
 #include "nvs_flash.h"
 #include "sdkconfig.h"
+#include "esp_heap_caps.h"
+#include "spi_flash_mmap.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
-#include "esp_heap_caps.h"
 
 #define TAG "MAIN"
-#define FRAMESKIP 0
 
 #undef B0
 #include "gba.h"
 #include "globals.h"
 
-// Double framebuffers in PSRAM
-static uint16_t *FB_front = NULL;
-static uint16_t *FB_back  = NULL;
+// Use PSRAM for frame buffer
+uint16_t *FB;
 
-// Sync primitives
-static SemaphoreHandle_t frameSemaphore = NULL;
-static SemaphoreHandle_t bufferMutex    = NULL;
+int frameDrawn = 0;
+uint32_t frameCount = 0;
 
-static int      frameDrawn       = 0;
-static uint32_t frameCount       = 0;
-static int      frameskipCounter = 0;
+// Semaphore for dual core sync
+static SemaphoreHandle_t frameSem;
 
-// ─── GBA callbacks ────────────────────────────────────────────────────────────
+void emuRunFrame() {
+    frameDrawn = 0;
+    while (!frameDrawn) {
+        CPULoop();
+    }
+    frameCount++;
+}
 
 void systemMessage(const char *fmt, ...) {
     char buf[256];
@@ -54,62 +55,80 @@ void systemMessage(const char *fmt, ...) {
 
 void systemDrawScreen(void) {
     frameDrawn = 1;
-
-    frameskipCounter++;
-    if (frameskipCounter <= FRAMESKIP) {
-        return;
-    }
-    frameskipCounter = 0;
-
-    // Copy pix → FB_back (2 pixels at a time)
-    uint16_t *src   = pix;
-    uint32_t *dst32 = (uint32_t *)FB_back;
-
+    uint16_t *src = pix;
+    uint16_t *dst = FB;
+    // Optimized pixel copy with bswap
     for (int y = 0; y < 160; y++) {
-        for (int x = 0; x < 240; x += 2) {
-            uint32_t p = ((uint32_t)__builtin_bswap16(src[x])) |
-                         ((uint32_t)__builtin_bswap16(src[x + 1]) << 16);
-            *dst32++ = p;
+        for (int x = 0; x < 240; x++) {
+            *dst++ = __builtin_bswap16(*src++);
         }
-        src += 256;
+        src += 256 - 240;
     }
-
-    // Swap buffers
-    xSemaphoreTake(bufferMutex, portMAX_DELAY);
-    uint16_t *tmp = FB_front;
-    FB_front      = FB_back;
-    FB_back       = tmp;
-    xSemaphoreGive(bufferMutex);
-
-    // Signal display task
-    xSemaphoreGive(frameSemaphore);
+    lcdSetWindow(0, 40, 240 - 1, 200 - 1);
+    lcdWriteFB((uint8_t*)FB, 240 * 160 * 2);
 }
 
 void systemOnWriteDataToSoundBuffer(int16_t *finalWave, int length) {}
-
-// ─── Emulator init ────────────────────────────────────────────────────────────
 
 void emuInit() {
     CPUSetupBuffers();
     CPUInit(NULL, false);
     CPUReset();
-    SetFrameskip(FRAMESKIP);
+    // Set frameskip to 0 for full speed — change to 1 if too slow
+    SetFrameskip(0);
 }
 
-void emuRunFrame() {
-    frameDrawn = 0;
-    while (!frameDrawn) {
-        CPULoop();
+extern "C" void app_main() {
+    osInit();
+    delayMS(500);
+
+    // Allocate frame buffer in PSRAM
+    FB = (uint16_t *)heap_caps_malloc(240 * 160 * 2, MALLOC_CAP_SPIRAM);
+    if (!FB) {
+        // Fallback to internal RAM
+        FB = (uint16_t *)malloc(240 * 160 * 2);
     }
-    frameCount++;
-}
+    memset(FB, 0, 240 * 160 * 2);
 
-// ─── Core 1: Emulator task ────────────────────────────────────────────────────
+    lcdSetWindow(0, 0, LCD_W - 1, LCD_H - 1);
+    lcdWriteFB((uint8_t*)FB, 240 * 160 * 2);
+    lcdWriteFB((uint8_t*)FB, 240 * 160 * 2);
 
-static void emuTask(void *arg) {
-    // Remove from watchdog — emulator intentionally monopolizes Core 1
-    esp_err_t wdt_ret = esp_task_wdt_delete(NULL);
-    (void)wdt_ret;  // ignore error if not registered
+    printf("Hello world!\n");
+
+    spi_flash_mmap_handle_t outHandle;
+    const esp_partition_t *partition = esp_partition_find_first(
+        ESP_PARTITION_TYPE_ANY, ESP_PARTITION_SUBTYPE_ANY, "rom");
+    if (partition == NULL) {
+        ESP_LOGE(TAG, "Failed to find rom partition");
+        return;
+    }
+
+    esp_err_t ret = esp_partition_mmap(
+        partition, 0, partition->size, SPI_FLASH_MMAP_DATA,
+        (const void **)&rom, &outHandle);
+    ESP_ERROR_CHECK(ret);
+    printf("rom: %p\n", rom);
+
+    // Allocate all large buffers in PSRAM
+    vram             = (uint8_t *)heap_caps_malloc(0x20000, MALLOC_CAP_SPIRAM);
+    workRAM          = (uint8_t *)heap_caps_malloc(0x40000, MALLOC_CAP_SPIRAM);
+    bios             = (uint8_t *)heap_caps_malloc(0x4000,  MALLOC_CAP_SPIRAM);
+    pix              = (uint16_t*)heap_caps_malloc(4 * 256 * 160, MALLOC_CAP_SPIRAM);
+    libretro_save_buf= (uint8_t *)heap_caps_malloc(0x20000 + 0x2000, MALLOC_CAP_SPIRAM);
+
+    // Fallback to internal RAM if PSRAM alloc fails
+    if (!vram)             vram             = (uint8_t *)malloc(0x20000);
+    if (!workRAM)          workRAM          = (uint8_t *)malloc(0x40000);
+    if (!bios)             bios             = (uint8_t *)malloc(0x4000);
+    if (!pix)              pix              = (uint16_t*)malloc(4 * 256 * 160);
+    if (!libretro_save_buf)libretro_save_buf= (uint8_t *)malloc(0x20000 + 0x2000);
+
+    printf("internalRAM: %p, vram: %p, workRAM: %p, bios: %p, pix: %p\n"
+           "libretro_save_buf: %p\n",
+           internalRAM, vram, workRAM, bios, pix, libretro_save_buf);
+
+    emuInit();
 
     TickType_t fpsTick = xTaskGetTickCount();
 
@@ -118,121 +137,12 @@ static void emuTask(void *arg) {
         UpdateJoypad();
         emuRunFrame();
 
-        if (frameCount % 120 == 0) {
+        if (frameCount % 60 == 0) {
             TickType_t now = xTaskGetTickCount();
-            int msPassed   = (now - fpsTick) * portTICK_PERIOD_MS;
-            fpsTick        = now;
-            int fps        = 120 * 1000 / msPassed;
+            int msPassed = (now - fpsTick) * portTICK_PERIOD_MS;
+            fpsTick = now;
+            int fps = 60 * 1000 / msPassed;
             printf("FPS: %d\n", fps);
         }
-
-        taskYIELD();
     }
-}
-
-// ─── Core 0: Display task ─────────────────────────────────────────────────────
-
-static void displayTask(void *arg) {
-    while (1) {
-        if (xSemaphoreTake(frameSemaphore, portMAX_DELAY) == pdTRUE) {
-            xSemaphoreTake(bufferMutex, portMAX_DELAY);
-            uint16_t *fb = FB_front;
-            xSemaphoreGive(bufferMutex);
-
-            lcdSetWindow(0, 40, 240 - 1, 200 - 1);
-            lcdWriteFB((uint8_t *)fb, 240 * 160 * 2);
-        }
-    }
-}
-
-// ─── app_main ─────────────────────────────────────────────────────────────────
-
-extern "C" void app_main() {
-    // Lock both cores to 240MHz
-    esp_pm_config_esp32s3_t pm_config = {
-        .max_freq_mhz       = 240,
-        .min_freq_mhz       = 240,
-        .light_sleep_enable = false
-    };
-    esp_pm_configure(&pm_config);
-
-    osInit();
-    delayMS(500);
-
-    // Allocate double framebuffers in PSRAM
-    FB_front = (uint16_t *)heap_caps_malloc(240 * 160 * sizeof(uint16_t), MALLOC_CAP_SPIRAM);
-    FB_back  = (uint16_t *)heap_caps_malloc(240 * 160 * sizeof(uint16_t), MALLOC_CAP_SPIRAM);
-
-    if (!FB_front || !FB_back) {
-        ESP_LOGE(TAG, "Failed to allocate framebuffers in PSRAM");
-        return;
-    }
-
-    memset(FB_front, 0, 240 * 160 * sizeof(uint16_t));
-    memset(FB_back,  0, 240 * 160 * sizeof(uint16_t));
-
-    // Clear full display on boot
-    uint16_t *clearBuf = (uint16_t *)heap_caps_malloc(LCD_W * LCD_H * 2, MALLOC_CAP_SPIRAM);
-    if (clearBuf) {
-        memset(clearBuf, 0, LCD_W * LCD_H * 2);
-        lcdSetWindow(0, 0, LCD_W - 1, LCD_H - 1);
-        lcdWriteFB((uint8_t *)clearBuf, LCD_W * LCD_H * 2);
-        free(clearBuf);
-    }
-
-    // Allocate GBA buffers in PSRAM
-    vram              = (uint8_t *)  heap_caps_malloc(0x20000,          MALLOC_CAP_SPIRAM);
-    workRAM           = (uint8_t *)  heap_caps_malloc(0x40000,          MALLOC_CAP_SPIRAM);
-    bios              = (uint8_t *)  heap_caps_malloc(0x4000,           MALLOC_CAP_SPIRAM);
-    pix               = (uint16_t *) heap_caps_malloc(4 * 256 * 160,    MALLOC_CAP_SPIRAM);
-    libretro_save_buf = (uint8_t *)  heap_caps_malloc(0x20000 + 0x2000, MALLOC_CAP_SPIRAM);
-
-    printf("internalRAM: %p, vram: %p, workRAM: %p, bios: %p, pix: %p\n, libretro_save_buf: %p\n",
-           internalRAM, vram, workRAM, bios, pix, libretro_save_buf);
-
-    if (!vram || !workRAM || !bios || !pix || !libretro_save_buf) {
-        ESP_LOGE(TAG, "Failed to allocate GBA buffers");
-        return;
-    }
-
-    // Map ROM partition
-    spi_flash_mmap_handle_t outHandle;
-    const esp_partition_t *partition = esp_partition_find_first(
-        ESP_PARTITION_TYPE_ANY, ESP_PARTITION_SUBTYPE_ANY, "rom");
-
-    if (partition == NULL) {
-        ESP_LOGE(TAG, "Failed to find rom partition");
-        return;
-    }
-
-    esp_err_t ret = esp_partition_mmap(
-        partition, 0, partition->size,
-        ESP_PARTITION_MMAP_DATA,
-        (const void **)&rom, &outHandle);
-    ESP_ERROR_CHECK(ret);
-    printf("rom: %p\n", rom);
-
-    // Init emulator
-    emuInit();
-
-    // Create sync primitives
-    frameSemaphore = xSemaphoreCreateBinary();
-    bufferMutex    = xSemaphoreCreateMutex();
-
-    if (!frameSemaphore || !bufferMutex) {
-        ESP_LOGE(TAG, "Failed to create semaphores");
-        return;
-    }
-
-    // Launch display task on Core 0
-    xTaskCreatePinnedToCore(
-        displayTask, "disp",
-        4096, NULL, 4, NULL, 0);
-
-    // Launch emulator task on Core 1
-    xTaskCreatePinnedToCore(
-        emuTask, "emu",
-        16384, NULL, 5, NULL, 1);
-
-    // app_main exits — tasks keep running
 }
