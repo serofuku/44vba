@@ -24,98 +24,55 @@ jobs:
           cd ~/esp-idf
           ./install.sh esp32s3
 
-      - name: Patch ESP-IDF remove Werror
-        run: |
-          echo "=== Patching ESP-IDF to remove -Werror everywhere ==="
-
-          # Patch all cmake files inside ESP-IDF
-          find ~/esp-idf -name "*.cmake" | xargs grep -l "\-Werror" | while read f; do
-            echo "Patching cmake: $f"
-            sed -i 's/-Werror[^" \t]*//' "$f"
-          done
-
-          # Patch all CMakeLists.txt inside ESP-IDF
-          find ~/esp-idf -name "CMakeLists.txt" | xargs grep -l "\-Werror" | while read f; do
-            echo "Patching CMakeLists: $f"
-            sed -i 's/-Werror[^" \t]*//' "$f"
-          done
-
-          # Patch the main compiler flags file specifically
-          COMPILER_FILE=$(find ~/esp-idf -path "*/tools/cmake/compiler.cmake" | head -1)
-          if [ -n "$COMPILER_FILE" ]; then
-            echo "=== Patching compiler.cmake: $COMPILER_FILE ==="
-            cat "$COMPILER_FILE"
-            sed -i 's/-Werror[^" \t]*//' "$COMPILER_FILE"
-            sed -i 's/GCC_WARNINGS_AS_ERRORS[^" \t]*//' "$COMPILER_FILE"
-            echo "=== After patch ==="
-            cat "$COMPILER_FILE"
-          fi
-
-          # Patch Kconfig warnings-as-errors option
-          KCONFIG=$(find ~/esp-idf -name "Kconfig.projbuild" | xargs grep -l "COMPILER_WARNINGS_AS_ERRORS" 2>/dev/null | head -1)
-          if [ -n "$KCONFIG" ]; then
-            echo "Patching Kconfig: $KCONFIG"
-            sed -i 's/default y/default n/' "$KCONFIG"
-          fi
-
-          echo "=== ESP-IDF patch complete ==="
-
-      - name: Patch project files
+      - name: Patch project files only
         run: |
           cd port-esp32s3
 
           echo "=== Patching sdkconfig.defaults ==="
-          # Remove any conflicting entries
-          grep -v "COMPILER_WARN\|COMPILER_HIDE\|COMPILER_DISABLE\|WERROR\|warnings_as_errors" \
+          grep -v "COMPILER_WARN\|COMPILER_HIDE\|COMPILER_DISABLE\|WERROR\|WARNINGS_AS_ERRORS" \
             sdkconfig.defaults > sdkconfig.defaults.tmp || true
           mv sdkconfig.defaults.tmp sdkconfig.defaults
-
-          # Add correct keys
-          cat >> sdkconfig.defaults << 'EOF'
-          CONFIG_COMPILER_DISABLE_GCC12_WARNINGS=y
-          CONFIG_COMPILER_WARN_WRITE_STRINGS=n
-          CONFIG_COMPILER_WARNINGS_AS_ERRORS=n
-          EOF
-
-          echo "=== sdkconfig.defaults ==="
+          echo "CONFIG_COMPILER_DISABLE_GCC12_WARNINGS=y" >> sdkconfig.defaults
+          echo "CONFIG_COMPILER_WARNINGS_AS_ERRORS=n" >> sdkconfig.defaults
+          echo "CONFIG_COMPILER_WARN_WRITE_STRINGS=n" >> sdkconfig.defaults
           cat sdkconfig.defaults
 
           echo "=== Patching CMakeLists.txt ==="
-          # Remove any existing -Werror flags
-          sed -i 's/-Werror[^" \t]*//' CMakeLists.txt
+          cat CMakeLists.txt
 
-          # Check if add_compile_options already exists
-          if grep -q "add_compile_options" CMakeLists.txt; then
-            echo "add_compile_options already exists, skipping"
-          else
-            # Add after project() line
-            sed -i '/^project(/a add_compile_options(\n  -Wno-error\n  -Wno-unused-but-set-variable\n  -Wno-unused-function\n  -Wno-implicit-fallthrough\n  -Wno-format\n)' CMakeLists.txt
+          # Only remove -Werror if it exists as a standalone flag
+          # Use word boundary safe replacement
+          sed -i 's/ -Werror / /g' CMakeLists.txt
+          sed -i 's/ -Werror$//g' CMakeLists.txt
+          sed -i 's/"-Werror"//g' CMakeLists.txt
+
+          # Add compile options only if not already there
+          if ! grep -q "Wno-error" CMakeLists.txt; then
+            # Insert after cmake_minimum_required line safely
+            sed -i '/cmake_minimum_required/a \
+          \
+          # Disable warnings as errors\
+          add_compile_options(-Wno-error -Wno-unused-but-set-variable -Wno-unused-function -Wno-implicit-fallthrough -Wno-format)' CMakeLists.txt
           fi
 
-          echo "=== CMakeLists.txt ==="
+          echo "=== Final CMakeLists.txt ==="
           cat CMakeLists.txt
 
       - name: Build
         run: |
           . ~/esp-idf/export.sh
           cd port-esp32s3
+
           idf.py set-target esp32s3
 
-          # Set sdkconfig option directly to disable warnings as errors
-          idf.py build \
-            --cmake-warn-uninitialized \
-            2>&1 | tee build.log || true
-
-          # Try again with explicit sdkconfig override if first attempt failed
-          if ! grep -q "Project build complete" build.log; then
-            echo "=== First build attempt failed, trying with explicit config ==="
-            echo "CONFIG_COMPILER_WARNINGS_AS_ERRORS=n" >> sdkconfig
-            echo "CONFIG_COMPILER_DISABLE_GCC12_WARNINGS=y" >> sdkconfig
-            idf.py build 2>&1 | tee -a build.log
-          fi
+          # Use idf.py with explicit sdkconfig override via -D
+          idf.py \
+            -DSDKCONFIG_DEFAULTS="sdkconfig.defaults" \
+            build \
+            2>&1 | tee build.log
 
           BUILD_EXIT=${PIPESTATUS[0]}
-          echo "=== Last 100 lines of build log ==="
+          echo "=== Last 100 lines ==="
           tail -100 build.log
           exit $BUILD_EXIT
 
@@ -123,11 +80,11 @@ jobs:
         if: always()
         run: |
           cd port-esp32s3
-          echo "=== Top level build files ==="
+          echo "=== Top level build ==="
           ls -la build/ || echo "NO BUILD DIR"
-          echo "=== All .bin files ==="
+          echo "=== .bin files ==="
           find build -name "*.bin" | sort
-          echo "=== All .elf files ==="
+          echo "=== .elf files ==="
           find build -name "*.elf" | sort
           echo "=== Bootloader ==="
           ls -la build/bootloader/ || echo "MISSING"
@@ -166,7 +123,7 @@ jobs:
             fi
           fi
 
-          # Try 4: Deep search excluding system/cmake dirs
+          # Try 4: Deep search excluding system dirs
           if [ -z "$APP_BIN" ] || [ ! -f "$APP_BIN" ]; then
             APP_BIN=$(find build -name "*.bin" \
               ! -path "*/CMakeFiles/*" \
@@ -180,20 +137,10 @@ jobs:
 
           echo "=== Final app binary: $APP_BIN ==="
 
-          # Validate all required files exist
           MISSING=0
-          if [ ! -f "build/bootloader/bootloader.bin" ]; then
-            echo "ERROR: bootloader.bin missing!"
-            MISSING=1
-          fi
-          if [ ! -f "build/partition_table/partition-table.bin" ]; then
-            echo "ERROR: partition-table.bin missing!"
-            MISSING=1
-          fi
-          if [ -z "$APP_BIN" ] || [ ! -f "$APP_BIN" ]; then
-            echo "ERROR: app binary missing!"
-            MISSING=1
-          fi
+          [ ! -f "build/bootloader/bootloader.bin" ] && echo "ERROR: bootloader.bin missing!" && MISSING=1
+          [ ! -f "build/partition_table/partition-table.bin" ] && echo "ERROR: partition-table.bin missing!" && MISSING=1
+          { [ -z "$APP_BIN" ] || [ ! -f "$APP_BIN" ]; } && echo "ERROR: app binary missing!" && MISSING=1
 
           if [ "$MISSING" = "1" ]; then
             echo "=== Full build dir dump ==="
