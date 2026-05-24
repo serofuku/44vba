@@ -27,7 +27,9 @@
 #include "gba.h"
 #include "globals.h"
 
+// Frame buffer in PSRAM
 static uint16_t *FB;
+
 volatile int frameDrawn = 0;
 uint32_t frameCount = 0;
 
@@ -48,41 +50,42 @@ void systemMessage(const char *fmt, ...) {
     ESP_LOGE("GBA", "%s", buf);
 }
 
+// Optimized screen draw — runs on Core 0
 void systemDrawScreen(void) {
     frameDrawn = 1;
     uint16_t *src = pix;
     uint16_t *dst = FB;
+    // Fast bswap pixel copy
     for (int i = 0; i < 160; i++) {
         for (int j = 0; j < 240; j++) {
             *dst++ = __builtin_bswap16(*src++);
         }
-        src += 16;
+        src += 16; // skip padding (256 - 240 = 16)
     }
     lcdSetWindow(0, 40, 239, 199);
     lcdWriteFB((uint8_t*)FB, 240 * 160 * 2);
 }
 
-// Sound completely disabled for max performance
 void systemOnWriteDataToSoundBuffer(int16_t *finalWave, int length) {}
 
 static void allocBuffers() {
+    // Try PSRAM first, fallback to internal RAM
     #define PSRAM_ALLOC(size) heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
     #define IRAM_ALLOC(size)  heap_caps_malloc(size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
 
-    // Frame buffer in PSRAM
-    FB = (uint16_t*)PSRAM_ALLOC(240 * 160 * 2);
-    if (!FB) FB = (uint16_t*)IRAM_ALLOC(240 * 160 * 2);
-
-    // Large GBA buffers in PSRAM
+    FB               = (uint16_t*)PSRAM_ALLOC(240 * 160 * 2);
     vram             = (uint8_t *)(PSRAM_ALLOC(0x20000) ?: IRAM_ALLOC(0x20000));
     workRAM          = (uint8_t *)(PSRAM_ALLOC(0x40000) ?: IRAM_ALLOC(0x40000));
     bios             = (uint8_t *)(PSRAM_ALLOC(0x4000)  ?: IRAM_ALLOC(0x4000));
-    // pix buffer needs fast access - try internal first
-    pix              = (uint16_t*)(IRAM_ALLOC(4 * 256 * 160) ?: PSRAM_ALLOC(4 * 256 * 160));
+    pix              = (uint16_t*)(PSRAM_ALLOC(4 * 256 * 160) ?: IRAM_ALLOC(4 * 256 * 160));
     libretro_save_buf= (uint8_t *)(PSRAM_ALLOC(0x22000) ?: IRAM_ALLOC(0x22000));
+
+    if (!FB) FB = (uint16_t*)IRAM_ALLOC(240 * 160 * 2);
 
     printf("FB:%p vram:%p workRAM:%p bios:%p pix:%p save:%p\n",
            FB, vram, workRAM, bios, pix, libretro_save_buf);
+
+    // Print free heap
     printf("Free internal: %lu, Free PSRAM: %lu\n",
            heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
            heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
@@ -92,7 +95,7 @@ void emuInit() {
     CPUSetupBuffers();
     CPUInit(NULL, false);
     CPUReset();
-    SetFrameskip(1);
+    SetFrameskip(0); // 0 = no skip, 1 = skip every other frame
 }
 
 extern "C" void app_main() {
@@ -107,6 +110,7 @@ extern "C" void app_main() {
 
     printf("44VBA starting...\n");
 
+    // Map ROM from flash partition
     spi_flash_mmap_handle_t outHandle;
     const esp_partition_t *partition = esp_partition_find_first(
         ESP_PARTITION_TYPE_ANY, ESP_PARTITION_SUBTYPE_ANY, "rom");
@@ -129,6 +133,7 @@ extern "C" void app_main() {
         UpdateJoypad();
         emuRunFrame();
 
+        // Print FPS every 60 frames
         if (frameCount % 60 == 0) {
             TickType_t now = xTaskGetTickCount();
             int ms = (now - fpsTick) * portTICK_PERIOD_MS;
