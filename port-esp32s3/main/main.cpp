@@ -113,7 +113,7 @@ extern "C" void app_main() {
     // Clear full screen
     memset(FB, 0, 240 * 160 * 2);
     lcdSetWindow(0, 0, LCD_W - 1, LCD_H - 1);
-    lcdWriteFB((uint8_t*)FB, LCD_W * LCD_H * 2);
+    lcdWriteFB((uint8_t*)FB, 240 * 160 * 2);
 
     // Create dual core semaphores
     fbReady = xSemaphoreCreateBinary();
