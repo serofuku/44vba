@@ -10,14 +10,18 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_system.h"
-#include "esp_heap_caps.h"
+#include "esp_wifi.h"
 #include "os.h"
 #include "nvs_flash.h"
 #include "sdkconfig.h"
+#include "esp_heap_caps.h"
 #include "spi_flash_mmap.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
+
 #define TAG "MAIN"
+
 #undef B0
 #include "gba.h"
 #include "globals.h"
@@ -25,6 +29,19 @@
 static uint16_t *FB;
 volatile int frameDrawn = 0;
 uint32_t frameCount = 0;
+
+// Dual core display transfer
+static SemaphoreHandle_t fbReady;
+static SemaphoreHandle_t fbDone;
+
+static void displayTask(void *arg) {
+    while (1) {
+        xSemaphoreTake(fbReady, portMAX_DELAY);
+        lcdSetWindow(0, 40, 239, 199);
+        lcdWriteFB((uint8_t*)FB, 240 * 160 * 2);
+        xSemaphoreGive(fbDone);
+    }
+}
 
 void emuRunFrame() {
     frameDrawn = 0;
@@ -45,16 +62,18 @@ void systemMessage(const char *fmt, ...) {
 
 void systemDrawScreen(void) {
     frameDrawn = 1;
+    // Wait for previous display transfer to finish
+    xSemaphoreTake(fbDone, portMAX_DELAY);
     uint16_t *src = pix;
     uint16_t *dst = FB;
-    for (int y = 0; y < 160; y++) {
-        for (int x = 0; x < 240; x++) {
+    for (int i = 0; i < 160; i++) {
+        for (int j = 0; j < 240; j++) {
             *dst++ = __builtin_bswap16(*src++);
         }
-        src += 256 - 240;
+        src += 16;
     }
-    lcdSetWindow(0, 40, 239, 199);
-    lcdWriteFB((uint8_t*)FB, 240 * 160 * 2);
+    // Signal display task to start transfer
+    xSemaphoreGive(fbReady);
 }
 
 void systemOnWriteDataToSoundBuffer(int16_t *finalWave, int length) {}
@@ -62,6 +81,7 @@ void systemOnWriteDataToSoundBuffer(int16_t *finalWave, int length) {}
 static void allocBuffers() {
     #define PSRAM_ALLOC(size) heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
     #define IRAM_ALLOC(size)  heap_caps_malloc(size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
+
     FB               = (uint16_t*)PSRAM_ALLOC(240 * 160 * 2);
     if (!FB) FB      = (uint16_t*)IRAM_ALLOC(240 * 160 * 2);
     vram             = (uint8_t *)(PSRAM_ALLOC(0x20000) ?: IRAM_ALLOC(0x20000));
@@ -69,6 +89,7 @@ static void allocBuffers() {
     bios             = (uint8_t *)(PSRAM_ALLOC(0x4000)  ?: IRAM_ALLOC(0x4000));
     pix              = (uint16_t*)(IRAM_ALLOC(4 * 256 * 160) ?: PSRAM_ALLOC(4 * 256 * 160));
     libretro_save_buf= (uint8_t *)(PSRAM_ALLOC(0x22000) ?: IRAM_ALLOC(0x22000));
+
     printf("FB:%p vram:%p workRAM:%p bios:%p pix:%p save:%p\n",
            FB, vram, workRAM, bios, pix, libretro_save_buf);
     printf("Free internal: %lu, Free PSRAM: %lu\n",
@@ -86,10 +107,22 @@ void emuInit() {
 extern "C" void app_main() {
     osInit();
     delayMS(200);
+
     allocBuffers();
+
+    // Clear full screen
     memset(FB, 0, 240 * 160 * 2);
     lcdSetWindow(0, 0, LCD_W - 1, LCD_H - 1);
     lcdWriteFB((uint8_t*)FB, LCD_W * LCD_H * 2);
+
+    // Create dual core semaphores
+    fbReady = xSemaphoreCreateBinary();
+    fbDone  = xSemaphoreCreateBinary();
+    xSemaphoreGive(fbDone); // allow first frame immediately
+
+    // Start display task on Core 1
+    xTaskCreatePinnedToCore(displayTask, "display", 4096, NULL, 5, NULL, 1);
+
     printf("44VBA starting...\n");
 
     spi_flash_mmap_handle_t outHandle;
@@ -112,11 +145,11 @@ extern "C" void app_main() {
         joy = osReadKey();
         UpdateJoypad();
         emuRunFrame();
-        if (frameCount % 120 == 0) {
+        if (frameCount % 60 == 0) {
             TickType_t now = xTaskGetTickCount();
             int ms = (now - fpsTick) * portTICK_PERIOD_MS;
             fpsTick = now;
-            printf("FPS: %d\n", ms > 0 ? (120 * 1000 / ms) : 0);
+            printf("FPS: %d\n", ms > 0 ? (60 * 1000 / ms) : 0);
         }
     }
 }
