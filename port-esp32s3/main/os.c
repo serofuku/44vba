@@ -105,8 +105,8 @@ void lcdInit() {
     lcdCmd8(0xC5); lcdDat8(0x32); lcdDat8(0x3C);
     lcdCmd8(0xC7); lcdDat8(0x91);
 
-    // Fixed: 0xE8 instead of 0x48 — fixes horizontal mirror
-    lcdCmd8(0x36); lcdDat8(0xE8);
+    // 0x08 = normal orientation, BGR color order — fixes mirror
+    lcdCmd8(0x36); lcdDat8(0x08);
 
     lcdCmd8(0x3A); lcdDat8(0x55);
     lcdCmd8(0xB1); lcdDat8(0x00); lcdDat8(0x10);
