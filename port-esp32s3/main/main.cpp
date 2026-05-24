@@ -17,6 +17,7 @@
 #include "spi_flash_mmap.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+
 #define TAG "MAIN"
 #undef B0
 #include "gba.h"
@@ -51,18 +52,22 @@ void systemDrawScreen(void) {
         for (int j = 0; j < 240; j++) {
             *dst++ = __builtin_bswap16(*src++);
         }
-        src += 16;
+        src += 16; // skip 256-240 padding
     }
-    // Centered on 240x320 screen: (320-160)/2 = 80
+    // GBA 240x160 centered on 240x320 screen
+    // Top black bar: (320-160)/2 = 80px
+    // Bottom: 80 + 160 - 1 = 239
     lcdSetWindow(0, 80, 239, 239);
     lcdWriteFB((uint8_t*)FB, 240 * 160 * 2);
 }
 
+// Sound disabled for performance
 void systemOnWriteDataToSoundBuffer(int16_t *finalWave, int length) {}
 
 static void allocBuffers() {
     #define PSRAM_ALLOC(size) heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
     #define IRAM_ALLOC(size)  heap_caps_malloc(size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
+
     FB               = (uint16_t*)PSRAM_ALLOC(240 * 160 * 2);
     if (!FB) FB      = (uint16_t*)IRAM_ALLOC(240 * 160 * 2);
     vram             = (uint8_t *)(PSRAM_ALLOC(0x20000) ?: IRAM_ALLOC(0x20000));
@@ -70,6 +75,7 @@ static void allocBuffers() {
     bios             = (uint8_t *)(PSRAM_ALLOC(0x4000)  ?: IRAM_ALLOC(0x4000));
     pix              = (uint16_t*)(IRAM_ALLOC(4 * 256 * 160) ?: PSRAM_ALLOC(4 * 256 * 160));
     libretro_save_buf= (uint8_t *)(PSRAM_ALLOC(0x22000) ?: IRAM_ALLOC(0x22000));
+
     printf("FB:%p vram:%p workRAM:%p bios:%p pix:%p save:%p\n",
            FB, vram, workRAM, bios, pix, libretro_save_buf);
     printf("Free internal: %lu, Free PSRAM: %lu\n",
@@ -87,10 +93,19 @@ void emuInit() {
 extern "C" void app_main() {
     osInit();
     delayMS(200);
+
     allocBuffers();
     memset(FB, 0, 240 * 160 * 2);
-    lcdSetWindow(0, 0, LCD_W - 1, LCD_H - 1);
-    lcdWriteFB((uint8_t*)FB, LCD_W * LCD_H * 2);
+
+    // Clear full screen to black
+    uint16_t *clearBuf = (uint16_t*)PSRAM_ALLOC(LCD_W * LCD_H * 2);
+    if (clearBuf) {
+        memset(clearBuf, 0, LCD_W * LCD_H * 2);
+        lcdSetWindow(0, 0, LCD_W - 1, LCD_H - 1);
+        lcdWriteFB((uint8_t*)clearBuf, LCD_W * LCD_H * 2);
+        free(clearBuf);
+    }
+
     printf("44VBA starting...\n");
 
     spi_flash_mmap_handle_t outHandle;
@@ -114,10 +129,4 @@ extern "C" void app_main() {
         UpdateJoypad();
         emuRunFrame();
         if (frameCount % 60 == 0) {
-            TickType_t now = xTaskGetTickCount();
-            int ms = (now - fpsTick) * portTICK_PERIOD_MS;
-            fpsTick = now;
-            printf("FPS: %d\n", ms > 0 ? (60 * 1000 / ms) : 0);
-        }
-    }
-}
+            TickT
