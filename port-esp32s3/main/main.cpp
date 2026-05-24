@@ -77,7 +77,7 @@ static void allocBuffers() {
     vram             = (uint8_t *)(PSRAM_ALLOC(0x20000) ?: IRAM_ALLOC(0x20000));
     workRAM          = (uint8_t *)(PSRAM_ALLOC(0x40000) ?: IRAM_ALLOC(0x40000));
     bios             = (uint8_t *)(PSRAM_ALLOC(0x4000)  ?: IRAM_ALLOC(0x4000));
-    pix              = (uint16_t*)(PSRAM_ALLOC(4 * 256 * 160) ?: IRAM_ALLOC(4 * 256 * 160));
+    pix              = (uint16_t*)(IRAM_ALLOC(4 * 256 * 160) ?: PSRAM_ALLOC(4 * 256 * 160));
     libretro_save_buf= (uint8_t *)(PSRAM_ALLOC(0x22000) ?: IRAM_ALLOC(0x22000));
 
     if (!FB) FB = (uint16_t*)IRAM_ALLOC(240 * 160 * 2);
@@ -95,7 +95,7 @@ void emuInit() {
     CPUSetupBuffers();
     CPUInit(NULL, false);
     CPUReset();
-    SetFrameskip(0); // 0 = no skip, 1 = skip every other frame
+    SetFrameskip(1); // 0 = no skip, 1 = skip every other frame
 }
 
 extern "C" void app_main() {
