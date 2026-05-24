@@ -52,16 +52,12 @@ void systemDrawScreen(void) {
         for (int j = 0; j < 240; j++) {
             *dst++ = __builtin_bswap16(*src++);
         }
-        src += 16; // skip 256-240 padding
+        src += 16;
     }
-    // GBA 240x160 centered on 240x320 screen
-    // Top black bar: (320-160)/2 = 80px
-    // Bottom: 80 + 160 - 1 = 239
     lcdSetWindow(0, 80, 239, 239);
     lcdWriteFB((uint8_t*)FB, 240 * 160 * 2);
 }
 
-// Sound disabled for performance
 void systemOnWriteDataToSoundBuffer(int16_t *finalWave, int length) {}
 
 static void allocBuffers() {
@@ -97,7 +93,6 @@ extern "C" void app_main() {
     allocBuffers();
     memset(FB, 0, 240 * 160 * 2);
 
-    // Clear full screen to black
     uint16_t *clearBuf = (uint16_t*)PSRAM_ALLOC(LCD_W * LCD_H * 2);
     if (clearBuf) {
         memset(clearBuf, 0, LCD_W * LCD_H * 2);
@@ -129,4 +124,10 @@ extern "C" void app_main() {
         UpdateJoypad();
         emuRunFrame();
         if (frameCount % 60 == 0) {
-            TickT
+            TickType_t now = xTaskGetTickCount();
+            int ms = (now - fpsTick) * portTICK_PERIOD_MS;
+            fpsTick = now;
+            printf("FPS: %d\n", ms > 0 ? (60 * 1000 / ms) : 0);
+        }
+    }
+}
