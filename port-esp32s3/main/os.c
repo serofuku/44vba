@@ -104,7 +104,10 @@ void lcdInit() {
     lcdCmd8(0xC1); lcdDat8(0x12);
     lcdCmd8(0xC5); lcdDat8(0x32); lcdDat8(0x3C);
     lcdCmd8(0xC7); lcdDat8(0x91);
-    lcdCmd8(0x36); lcdDat8(0x48);
+
+    // Fixed: 0xE8 instead of 0x48 — fixes horizontal mirror
+    lcdCmd8(0x36); lcdDat8(0xE8);
+
     lcdCmd8(0x3A); lcdDat8(0x55);
     lcdCmd8(0xB1); lcdDat8(0x00); lcdDat8(0x10);
     lcdCmd8(0xB6); lcdDat8(0x0A); lcdDat8(0xA2);
