@@ -10,13 +10,14 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_system.h"
-#include "esp_heap_caps.h"
 #include "os.h"
 #include "nvs_flash.h"
 #include "sdkconfig.h"
+#include "esp_heap_caps.h"
 #include "spi_flash_mmap.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 
 #define TAG "MAIN"
 #undef B0
@@ -26,6 +27,20 @@
 static uint16_t *FB;
 volatile int frameDrawn = 0;
 uint32_t frameCount = 0;
+
+static SemaphoreHandle_t fbReady;
+static SemaphoreHandle_t fbDone;
+
+// Core 1 - LCD transfer only
+static void IRAM_ATTR displayTask(void *arg) {
+    while (1) {
+        xSemaphoreTake(fbReady, portMAX_DELAY);
+        // Fixed: correct centered position on 240x320 screen
+        lcdSetWindow(0, 80, 239, 239);
+        lcdWriteFB((uint8_t*)FB, 240 * 160 * 2);
+        xSemaphoreGive(fbDone);
+    }
+}
 
 void emuRunFrame() {
     frameDrawn = 0;
@@ -44,21 +59,24 @@ void systemMessage(const char *fmt, ...) {
     ESP_LOGE("GBA", "%s", buf);
 }
 
-void systemDrawScreen(void) {
+// Core 0 - pixel copy with 32-bit optimization
+void IRAM_ATTR systemDrawScreen(void) {
     frameDrawn = 1;
-    uint16_t *src = pix;
+    xSemaphoreTake(fbDone, portMAX_DELAY);
+    const uint16_t *src = pix;
     uint16_t *dst = FB;
     for (int i = 0; i < 160; i++) {
-        for (int j = 0; j < 240; j++) {
-            *dst++ = __builtin_bswap16(*src++);
+        const uint32_t *s = (const uint32_t*)src;
+        uint32_t *d = (uint32_t*)dst;
+        for (int j = 0; j < 120; j++) {
+            uint32_t px = *s++;
+            *d++ = ((px & 0x00FF00FF) << 8) | ((px & 0xFF00FF00) >> 8);
         }
+        // Fixed: skip only 16 pixels of padding (256-240=16)
         src += 16;
+        dst += 240;
     }
-    // GBA 240x160 centered on 240x320:
-    // y1 = (320-160)/2 = 80
-    // y2 = 80 + 160 - 1 = 239
-    lcdSetWindow(0, 80, 239, 239);
-    lcdWriteFB((uint8_t*)FB, 240 * 160 * 2);
+    xSemaphoreGive(fbReady);
 }
 
 void systemOnWriteDataToSoundBuffer(int16_t *finalWave, int length) {}
@@ -72,10 +90,11 @@ static void allocBuffers() {
     vram             = (uint8_t *)(PSRAM_ALLOC(0x20000) ?: IRAM_ALLOC(0x20000));
     workRAM          = (uint8_t *)(PSRAM_ALLOC(0x40000) ?: IRAM_ALLOC(0x40000));
     bios             = (uint8_t *)(PSRAM_ALLOC(0x4000)  ?: IRAM_ALLOC(0x4000));
-    pix              = (uint16_t*)(IRAM_ALLOC(4 * 256 * 160) ?: PSRAM_ALLOC(4 * 256 * 160));
+    pix              = (uint16_t*)(PSRAM_ALLOC(4 * 256 * 160) ?: IRAM_ALLOC(4 * 256 * 160));
     libretro_save_buf= (uint8_t *)(PSRAM_ALLOC(0x22000) ?: IRAM_ALLOC(0x22000));
 
-    printf("FB:%p vram:%p workRAM:%p pix:%p\n", FB, vram, workRAM, pix);
+    printf("FB:%p vram:%p workRAM:%p bios:%p pix:%p save:%p\n",
+           FB, vram, workRAM, bios, pix, libretro_save_buf);
     printf("Free internal: %lu, Free PSRAM: %lu\n",
            heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
            heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
@@ -104,6 +123,18 @@ extern "C" void app_main() {
     }
     memset(FB, 0, 240 * 160 * 2);
 
+    // Create dual core semaphores
+    fbReady = xSemaphoreCreateBinary();
+    fbDone  = xSemaphoreCreateBinary();
+    xSemaphoreGive(fbDone);
+
+    // Pin display task to Core 1
+    xTaskCreatePinnedToCore(
+        displayTask, "display",
+        4096, NULL,
+        configMAX_PRIORITIES - 1,
+        NULL, 1);
+
     printf("44VBA starting...\n");
 
     spi_flash_mmap_handle_t outHandle;
@@ -120,6 +151,9 @@ extern "C" void app_main() {
     printf("ROM mapped at: %p size: %lu\n", rom, partition->size);
 
     emuInit();
+
+    // Pin emulator to Core 0 at high priority
+    vTaskPrioritySet(NULL, configMAX_PRIORITIES - 2);
 
     TickType_t fpsTick = xTaskGetTickCount();
     while (1) {
