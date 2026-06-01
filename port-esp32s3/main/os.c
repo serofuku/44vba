@@ -1,20 +1,24 @@
 #include "os.h"
 #include <stdlib.h>
 #include <string.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "driver/gpio.h"
-#include "driver/sdmmc_host.h"
 #include "driver/spi_master.h"
 #include "esp_err.h"
-#include "esp_event.h"
 #include "esp_log.h"
 #include "esp_system.h"
-#include "esp_wifi.h"
 #include "nvs_flash.h"
 #include "sdkconfig.h"
 
 void delayMS(int ms) { vTaskDelay(ms / portTICK_PERIOD_MS); }
 
 spi_device_handle_t spiDev0;
+
+// DMA transaction pool - reuse to avoid malloc overhead
+#define LCD_DMA_CHUNKS 8
+static spi_transaction_t dmaTransactions[LCD_DMA_CHUNKS];
+static int dmaQueued = 0;
 
 static void lcdWrite(uint8_t *buf, int len, int isCmd) {
     if (len <= 0) return;
@@ -23,7 +27,7 @@ static void lcdWrite(uint8_t *buf, int len, int isCmd) {
     memset(&t, 0, sizeof(t));
     t.length    = 8 * len;
     t.tx_buffer = buf;
-    ESP_ERROR_CHECK(spi_device_transmit(spiDev0, &t));
+    ESP_ERROR_CHECK(spi_device_polling_transmit(spiDev0, &t));
     gpio_set_level(PIN_LCD_DC, 1);
 }
 
@@ -45,25 +49,47 @@ void lcdSetWindow(uint16_t x1, uint16_t y1, uint16_t x2, uint16_t y2) {
     lcdCmd8(0x2C);
 }
 
+// DMA-based non-blocking LCD write
+// Queues transfers and waits only when queue is full
 void lcdWriteFB(uint8_t *buf, int len) {
     if (len <= 0) return;
 
+    // Wait for any previously queued DMA transfers to complete
+    spi_transaction_t *rtrans;
+    while (dmaQueued > 0) {
+        ESP_ERROR_CHECK(spi_device_get_trans_result(spiDev0, &rtrans, portMAX_DELAY));
+        dmaQueued--;
+    }
+
+    gpio_set_level(PIN_LCD_DC, 1);
+
     const int maxLen = 32760;
+    int chunk = 0;
 
     while (len > 0) {
         int writeLen = len > maxLen ? maxLen : len;
 
-        gpio_set_level(PIN_LCD_DC, 1);
+        spi_transaction_t *t = &dmaTransactions[chunk % LCD_DMA_CHUNKS];
+        memset(t, 0, sizeof(*t));
+        t->length    = 8 * writeLen;
+        t->tx_buffer = buf;
 
-        spi_transaction_t t;
-        memset(&t, 0, sizeof(t));
-        t.length    = 8 * writeLen;
-        t.tx_buffer = buf;
-
-        ESP_ERROR_CHECK(spi_device_transmit(spiDev0, &t));
+        // Queue DMA transfer — non-blocking
+        ESP_ERROR_CHECK(spi_device_queue_trans(spiDev0, t, portMAX_DELAY));
+        dmaQueued++;
 
         buf += writeLen;
         len -= writeLen;
+        chunk++;
+    }
+}
+
+// Call this to wait for DMA to finish
+void lcdFlushDMA() {
+    spi_transaction_t *rtrans;
+    while (dmaQueued > 0) {
+        ESP_ERROR_CHECK(spi_device_get_trans_result(spiDev0, &rtrans, portMAX_DELAY));
+        dmaQueued--;
     }
 }
 
@@ -91,10 +117,11 @@ void lcdInit() {
     ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO));
 
     static const spi_device_interface_config_t devcfg = {
-        .clock_speed_hz = 40000000,  // 40MHz — safe for all ILI9341
+        // Back to 80MHz — DMA handles the timing properly
+        .clock_speed_hz = 80000000,
         .mode           = 0,
         .spics_io_num   = -1,
-        .queue_size     = 7,
+        .queue_size     = 8,
     };
     ESP_ERROR_CHECK(spi_bus_add_device(SPI2_HOST, &devcfg, &spiDev0));
 
@@ -111,7 +138,7 @@ void lcdInit() {
     lcdCmd8(0xC1); lcdDat8(0x12);
     lcdCmd8(0xC5); lcdDat8(0x32); lcdDat8(0x3C);
     lcdCmd8(0xC7); lcdDat8(0x91);
-    lcdCmd8(0x36); lcdDat8(0xC8); // horizontal flip fixed
+    lcdCmd8(0x36); lcdDat8(0xC8);
     lcdCmd8(0x3A); lcdDat8(0x55);
     lcdCmd8(0xB1); lcdDat8(0x00); lcdDat8(0x10);
     lcdCmd8(0xB6); lcdDat8(0x0A); lcdDat8(0xA2);
