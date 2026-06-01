@@ -4,22 +4,19 @@
 #include <sys/param.h>
 #include <sys/stat.h>
 #include <sys/unistd.h>
-#include "config.h"
 #include "driver/gpio.h"
 #include "driver/sdmmc_host.h"
 #include "esp_err.h"
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_system.h"
-#include "esp_wifi.h"
+#include "esp_heap_caps.h"
 #include "os.h"
 #include "nvs_flash.h"
 #include "sdkconfig.h"
-#include "esp_heap_caps.h"
 #include "spi_flash_mmap.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "freertos/semphr.h"
 
 #define TAG "MAIN"
 #undef B0
@@ -29,19 +26,6 @@
 static uint16_t *FB;
 volatile int frameDrawn = 0;
 uint32_t frameCount = 0;
-
-static SemaphoreHandle_t fbReady;
-static SemaphoreHandle_t fbDone;
-
-// Core 1 - LCD transfer only
-static void IRAM_ATTR displayTask(void *arg) {
-    while (1) {
-        xSemaphoreTake(fbReady, portMAX_DELAY);
-        lcdSetWindow(0, 40, 239, 199);
-        lcdWriteFB((uint8_t*)FB, 240 * 160 * 2);
-        xSemaphoreGive(fbDone);
-    }
-}
 
 void emuRunFrame() {
     frameDrawn = 0;
@@ -60,23 +44,21 @@ void systemMessage(const char *fmt, ...) {
     ESP_LOGE("GBA", "%s", buf);
 }
 
-// Core 0 - 32-bit pixel copy (2 pixels at once)
-void IRAM_ATTR systemDrawScreen(void) {
+void systemDrawScreen(void) {
     frameDrawn = 1;
-    xSemaphoreTake(fbDone, portMAX_DELAY);
-    const uint16_t *src = pix;
+    uint16_t *src = pix;
     uint16_t *dst = FB;
     for (int i = 0; i < 160; i++) {
-        const uint32_t *s = (const uint32_t*)src;
-        uint32_t *d = (uint32_t*)dst;
-        for (int j = 0; j < 120; j++) {
-            uint32_t px = *s++;
-            *d++ = ((px & 0x00FF00FF) << 8) | ((px & 0xFF00FF00) >> 8);
+        for (int j = 0; j < 240; j++) {
+            *dst++ = __builtin_bswap16(*src++);
         }
-        src += 256;
-        dst += 240;
+        src += 16;
     }
-    xSemaphoreGive(fbReady);
+    // GBA 240x160 centered on 240x320:
+    // y1 = (320-160)/2 = 80
+    // y2 = 80 + 160 - 1 = 239
+    lcdSetWindow(0, 80, 239, 239);
+    lcdWriteFB((uint8_t*)FB, 240 * 160 * 2);
 }
 
 void systemOnWriteDataToSoundBuffer(int16_t *finalWave, int length) {}
@@ -90,11 +72,10 @@ static void allocBuffers() {
     vram             = (uint8_t *)(PSRAM_ALLOC(0x20000) ?: IRAM_ALLOC(0x20000));
     workRAM          = (uint8_t *)(PSRAM_ALLOC(0x40000) ?: IRAM_ALLOC(0x40000));
     bios             = (uint8_t *)(PSRAM_ALLOC(0x4000)  ?: IRAM_ALLOC(0x4000));
-    pix              = (uint16_t*)(PSRAM_ALLOC(4 * 256 * 160) ?: IRAM_ALLOC(4 * 256 * 160));
+    pix              = (uint16_t*)(IRAM_ALLOC(4 * 256 * 160) ?: PSRAM_ALLOC(4 * 256 * 160));
     libretro_save_buf= (uint8_t *)(PSRAM_ALLOC(0x22000) ?: IRAM_ALLOC(0x22000));
 
-    printf("FB:%p vram:%p workRAM:%p bios:%p pix:%p save:%p\n",
-           FB, vram, workRAM, bios, pix, libretro_save_buf);
+    printf("FB:%p vram:%p workRAM:%p pix:%p\n", FB, vram, workRAM, pix);
     printf("Free internal: %lu, Free PSRAM: %lu\n",
            heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
            heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
@@ -112,22 +93,24 @@ extern "C" void app_main() {
     delayMS(200);
 
     allocBuffers();
-    memset(FB, 0, 240 * 160 * 2);
-    lcdSetWindow(0, 0, LCD_W - 1, LCD_H - 1);
-    lcdWriteFB((uint8_t*)FB, 240 * 160 * 2);
 
-    fbReady = xSemaphoreCreateBinary();
-    fbDone  = xSemaphoreCreateBinary();
-    xSemaphoreGive(fbDone);
-    xTaskCreatePinnedToCore(displayTask, "display", 4096, NULL, configMAX_PRIORITIES - 1, NULL, 1);
+    // Clear full screen black
+    uint16_t *clearBuf = (uint16_t*)PSRAM_ALLOC(LCD_W * LCD_H * 2);
+    if (clearBuf) {
+        memset(clearBuf, 0, LCD_W * LCD_H * 2);
+        lcdSetWindow(0, 0, LCD_W - 1, LCD_H - 1);
+        lcdWriteFB((uint8_t*)clearBuf, LCD_W * LCD_H * 2);
+        free(clearBuf);
+    }
+    memset(FB, 0, 240 * 160 * 2);
 
     printf("44VBA starting...\n");
 
     spi_flash_mmap_handle_t outHandle;
     const esp_partition_t *partition = esp_partition_find_first(
         ESP_PARTITION_TYPE_ANY, ESP_PARTITION_SUBTYPE_ANY, "rom");
-    if (partition == NULL) {
-        ESP_LOGE(TAG, "Failed to find rom partition");
+    if (!partition) {
+        ESP_LOGE(TAG, "ROM partition not found!");
         return;
     }
     esp_err_t ret = esp_partition_mmap(
@@ -137,8 +120,6 @@ extern "C" void app_main() {
     printf("ROM mapped at: %p size: %lu\n", rom, partition->size);
 
     emuInit();
-
-    vTaskPrioritySet(NULL, configMAX_PRIORITIES - 2);
 
     TickType_t fpsTick = xTaskGetTickCount();
     while (1) {
