@@ -27,11 +27,22 @@
 #include "gba.h"
 #include "globals.h"
 
-// Frame buffer in PSRAM
 static uint16_t *FB;
-
 volatile int frameDrawn = 0;
 uint32_t frameCount = 0;
+
+static SemaphoreHandle_t fbReady;
+static SemaphoreHandle_t fbDone;
+
+// Core 1 - handles LCD transfer only
+static void IRAM_ATTR displayTask(void *arg) {
+    while (1) {
+        xSemaphoreTake(fbReady, portMAX_DELAY);
+        lcdSetWindow(0, 40, 239, 199);
+        lcdWriteFB((uint8_t*)FB, 240 * 160 * 2);
+        xSemaphoreGive(fbDone);
+    }
+}
 
 void emuRunFrame() {
     frameDrawn = 0;
@@ -50,42 +61,41 @@ void systemMessage(const char *fmt, ...) {
     ESP_LOGE("GBA", "%s", buf);
 }
 
-// Optimized screen draw — runs on Core 0
-void systemDrawScreen(void) {
+// Core 0 - pixel copy using 32-bit ops (2 pixels at once)
+void IRAM_ATTR systemDrawScreen(void) {
     frameDrawn = 1;
-    uint16_t *src = pix;
+    xSemaphoreTake(fbDone, portMAX_DELAY);
+    const uint16_t *src = pix;
     uint16_t *dst = FB;
-    // Fast bswap pixel copy
     for (int i = 0; i < 160; i++) {
-        for (int j = 0; j < 240; j++) {
-            *dst++ = __builtin_bswap16(*src++);
+        const uint32_t *s = (const uint32_t*)src;
+        uint32_t *d = (uint32_t*)dst;
+        for (int j = 0; j < 120; j++) {
+            uint32_t px = *s++;
+            *d++ = ((px & 0x00FF00FF) << 8) | ((px & 0xFF00FF00) >> 8);
         }
-        src += 16; // skip padding (256 - 240 = 16)
+        src += 256;
+        dst += 240;
     }
-    lcdSetWindow(0, 40, 239, 199);
-    lcdWriteFB((uint8_t*)FB, 240 * 160 * 2);
+    xSemaphoreGive(fbReady);
 }
 
 void systemOnWriteDataToSoundBuffer(int16_t *finalWave, int length) {}
 
 static void allocBuffers() {
-    // Try PSRAM first, fallback to internal RAM
     #define PSRAM_ALLOC(size) heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
     #define IRAM_ALLOC(size)  heap_caps_malloc(size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
 
     FB               = (uint16_t*)PSRAM_ALLOC(240 * 160 * 2);
+    if (!FB) FB      = (uint16_t*)IRAM_ALLOC(240 * 160 * 2);
     vram             = (uint8_t *)(PSRAM_ALLOC(0x20000) ?: IRAM_ALLOC(0x20000));
     workRAM          = (uint8_t *)(PSRAM_ALLOC(0x40000) ?: IRAM_ALLOC(0x40000));
     bios             = (uint8_t *)(PSRAM_ALLOC(0x4000)  ?: IRAM_ALLOC(0x4000));
     pix              = (uint16_t*)(PSRAM_ALLOC(4 * 256 * 160) ?: IRAM_ALLOC(4 * 256 * 160));
     libretro_save_buf= (uint8_t *)(PSRAM_ALLOC(0x22000) ?: IRAM_ALLOC(0x22000));
 
-    if (!FB) FB = (uint16_t*)IRAM_ALLOC(240 * 160 * 2);
-
     printf("FB:%p vram:%p workRAM:%p bios:%p pix:%p save:%p\n",
            FB, vram, workRAM, bios, pix, libretro_save_buf);
-
-    // Print free heap
     printf("Free internal: %lu, Free PSRAM: %lu\n",
            heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
            heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
@@ -95,7 +105,7 @@ void emuInit() {
     CPUSetupBuffers();
     CPUInit(NULL, false);
     CPUReset();
-    SetFrameskip(1); 
+    SetFrameskip(1);
 }
 
 extern "C" void app_main() {
@@ -104,13 +114,18 @@ extern "C" void app_main() {
 
     allocBuffers();
     memset(FB, 0, 240 * 160 * 2);
-
     lcdSetWindow(0, 0, LCD_W - 1, LCD_H - 1);
     lcdWriteFB((uint8_t*)FB, 240 * 160 * 2);
 
+    fbReady = xSemaphoreCreateBinary();
+    fbDone  = xSemaphoreCreateBinary();
+    xSemaphoreGive(fbDone);
+
+    // Display task on Core 1 at highest priority
+    xTaskCreatePinnedToCore(displayTask, "display", 4096, NULL, configMAX_PRIORITIES - 1, NULL, 1);
+
     printf("44VBA starting...\n");
 
-    // Map ROM from flash partition
     spi_flash_mmap_handle_t outHandle;
     const esp_partition_t *partition = esp_partition_find_first(
         ESP_PARTITION_TYPE_ANY, ESP_PARTITION_SUBTYPE_ANY, "rom");
@@ -126,14 +141,14 @@ extern "C" void app_main() {
 
     emuInit();
 
-    TickType_t fpsTick = xTaskGetTickCount();
+    // Pin emulator to Core 0 at high priority
+    vTaskPrioritySet(NULL, configMAX_PRIORITIES - 2);
 
+    TickType_t fpsTick = xTaskGetTickCount();
     while (1) {
         joy = osReadKey();
         UpdateJoypad();
         emuRunFrame();
-
-        // Print FPS every 60 frames
         if (frameCount % 60 == 0) {
             TickType_t now = xTaskGetTickCount();
             int ms = (now - fpsTick) * portTICK_PERIOD_MS;
