@@ -22,7 +22,6 @@
 #include "freertos/semphr.h"
 
 #define TAG "MAIN"
-
 #undef B0
 #include "gba.h"
 #include "globals.h"
@@ -34,7 +33,7 @@ uint32_t frameCount = 0;
 static SemaphoreHandle_t fbReady;
 static SemaphoreHandle_t fbDone;
 
-// Core 1 - handles LCD transfer only
+// Core 1 - LCD transfer only
 static void IRAM_ATTR displayTask(void *arg) {
     while (1) {
         xSemaphoreTake(fbReady, portMAX_DELAY);
@@ -61,7 +60,7 @@ void systemMessage(const char *fmt, ...) {
     ESP_LOGE("GBA", "%s", buf);
 }
 
-// Core 0 - pixel copy using 32-bit ops (2 pixels at once)
+// Core 0 - 32-bit pixel copy (2 pixels at once)
 void IRAM_ATTR systemDrawScreen(void) {
     frameDrawn = 1;
     xSemaphoreTake(fbDone, portMAX_DELAY);
@@ -120,8 +119,6 @@ extern "C" void app_main() {
     fbReady = xSemaphoreCreateBinary();
     fbDone  = xSemaphoreCreateBinary();
     xSemaphoreGive(fbDone);
-
-    // Display task on Core 1 at highest priority
     xTaskCreatePinnedToCore(displayTask, "display", 4096, NULL, configMAX_PRIORITIES - 1, NULL, 1);
 
     printf("44VBA starting...\n");
@@ -129,8 +126,8 @@ extern "C" void app_main() {
     spi_flash_mmap_handle_t outHandle;
     const esp_partition_t *partition = esp_partition_find_first(
         ESP_PARTITION_TYPE_ANY, ESP_PARTITION_SUBTYPE_ANY, "rom");
-    if (!partition) {
-        ESP_LOGE(TAG, "ROM partition not found!");
+    if (partition == NULL) {
+        ESP_LOGE(TAG, "Failed to find rom partition");
         return;
     }
     esp_err_t ret = esp_partition_mmap(
@@ -141,7 +138,6 @@ extern "C" void app_main() {
 
     emuInit();
 
-    // Pin emulator to Core 0 at high priority
     vTaskPrioritySet(NULL, configMAX_PRIORITIES - 2);
 
     TickType_t fpsTick = xTaskGetTickCount();
