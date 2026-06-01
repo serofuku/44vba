@@ -72,13 +72,13 @@ void IRAM_ATTR systemDrawScreen(void) {
             uint32_t px = *s++;
             *d++ = ((px & 0x00FF00FF) << 8) | ((px & 0xFF00FF00) >> 8);
         }
-        // Fixed: skip only 16 pixels of padding (256-240=16)
-        src += 16;
-        dst += 240;
+        // src row is 256 pixels wide (GBA internal)
+        // we read 240 pixels (120 uint32), skip remaining 16
+        src += 256; // move to next row (256 uint16 per row)
+        dst += 240; // move dst to next row (240 uint16 per row)
     }
     xSemaphoreGive(fbReady);
 }
-
 void systemOnWriteDataToSoundBuffer(int16_t *finalWave, int length) {}
 
 static void allocBuffers() {
