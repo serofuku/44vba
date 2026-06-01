@@ -10,10 +10,10 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "esp_heap_caps.h"
 #include "os.h"
 #include "nvs_flash.h"
 #include "sdkconfig.h"
-#include "esp_heap_caps.h"
 #include "spi_flash_mmap.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -24,20 +24,24 @@
 #include "gba.h"
 #include "globals.h"
 
-static uint16_t *FB;
+// Double buffer — Core 0 writes to back, Core 1 sends front to LCD
+static uint16_t *FB[2];
+static volatile int fbBack  = 0; // Core 0 writes here
+static volatile int fbFront = 1; // Core 1 reads here
+
 volatile int frameDrawn = 0;
 uint32_t frameCount = 0;
 
 static SemaphoreHandle_t fbReady;
 static SemaphoreHandle_t fbDone;
 
-// Core 1 - LCD transfer only
+// Core 1 — LCD transfer only
 static void IRAM_ATTR displayTask(void *arg) {
     while (1) {
         xSemaphoreTake(fbReady, portMAX_DELAY);
-        // Fixed: correct centered position on 240x320 screen
         lcdSetWindow(0, 80, 239, 239);
-        lcdWriteFB((uint8_t*)FB, 240 * 160 * 2);
+        lcdWriteFB((uint8_t*)FB[fbFront], 240 * 160 * 2);
+        lcdFlushDMA();
         xSemaphoreGive(fbDone);
     }
 }
@@ -59,12 +63,16 @@ void systemMessage(const char *fmt, ...) {
     ESP_LOGE("GBA", "%s", buf);
 }
 
-// Core 0 - pixel copy with 32-bit optimization
+// Core 0 — pixel copy to back buffer then swap
 void IRAM_ATTR systemDrawScreen(void) {
     frameDrawn = 1;
+
+    // Wait for Core 1 to finish with front buffer
     xSemaphoreTake(fbDone, portMAX_DELAY);
+
+    // Copy pixels to back buffer
     const uint16_t *src = pix;
-    uint16_t *dst = FB;
+    uint16_t *dst = FB[fbBack];
     for (int i = 0; i < 160; i++) {
         const uint32_t *s = (const uint32_t*)src;
         uint32_t *d = (uint32_t*)dst;
@@ -72,29 +80,39 @@ void IRAM_ATTR systemDrawScreen(void) {
             uint32_t px = *s++;
             *d++ = ((px & 0x00FF00FF) << 8) | ((px & 0xFF00FF00) >> 8);
         }
-        // src row is 256 pixels wide (GBA internal)
-        // we read 240 pixels (120 uint32), skip remaining 16
-        src += 256; // move to next row (256 uint16 per row)
-        dst += 240; // move dst to next row (240 uint16 per row)
+        src += 256;
+        dst += 240;
     }
+
+    // Swap buffers
+    int tmp  = fbFront;
+    fbFront  = fbBack;
+    fbBack   = tmp;
+
+    // Signal Core 1 to send new front buffer
     xSemaphoreGive(fbReady);
 }
+
 void systemOnWriteDataToSoundBuffer(int16_t *finalWave, int length) {}
 
 static void allocBuffers() {
     #define PSRAM_ALLOC(size) heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
     #define IRAM_ALLOC(size)  heap_caps_malloc(size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
 
-    FB               = (uint16_t*)PSRAM_ALLOC(240 * 160 * 2);
-    if (!FB) FB      = (uint16_t*)IRAM_ALLOC(240 * 160 * 2);
+    // Two frame buffers for double buffering
+    FB[0] = (uint16_t*)PSRAM_ALLOC(240 * 160 * 2);
+    FB[1] = (uint16_t*)PSRAM_ALLOC(240 * 160 * 2);
+    if (!FB[0]) FB[0] = (uint16_t*)IRAM_ALLOC(240 * 160 * 2);
+    if (!FB[1]) FB[1] = (uint16_t*)IRAM_ALLOC(240 * 160 * 2);
+
     vram             = (uint8_t *)(PSRAM_ALLOC(0x20000) ?: IRAM_ALLOC(0x20000));
     workRAM          = (uint8_t *)(PSRAM_ALLOC(0x40000) ?: IRAM_ALLOC(0x40000));
     bios             = (uint8_t *)(PSRAM_ALLOC(0x4000)  ?: IRAM_ALLOC(0x4000));
     pix              = (uint16_t*)(PSRAM_ALLOC(4 * 256 * 160) ?: IRAM_ALLOC(4 * 256 * 160));
     libretro_save_buf= (uint8_t *)(PSRAM_ALLOC(0x22000) ?: IRAM_ALLOC(0x22000));
 
-    printf("FB:%p vram:%p workRAM:%p bios:%p pix:%p save:%p\n",
-           FB, vram, workRAM, bios, pix, libretro_save_buf);
+    printf("FB[0]:%p FB[1]:%p vram:%p workRAM:%p pix:%p\n",
+           FB[0], FB[1], vram, workRAM, pix);
     printf("Free internal: %lu, Free PSRAM: %lu\n",
            heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
            heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
@@ -113,22 +131,24 @@ extern "C" void app_main() {
 
     allocBuffers();
 
-    // Clear full screen black
+    // Clear both buffers and full screen
+    memset(FB[0], 0, 240 * 160 * 2);
+    memset(FB[1], 0, 240 * 160 * 2);
     uint16_t *clearBuf = (uint16_t*)PSRAM_ALLOC(LCD_W * LCD_H * 2);
     if (clearBuf) {
         memset(clearBuf, 0, LCD_W * LCD_H * 2);
         lcdSetWindow(0, 0, LCD_W - 1, LCD_H - 1);
         lcdWriteFB((uint8_t*)clearBuf, LCD_W * LCD_H * 2);
+        lcdFlushDMA();
         free(clearBuf);
     }
-    memset(FB, 0, 240 * 160 * 2);
 
-    // Create dual core semaphores
+    // Create semaphores
     fbReady = xSemaphoreCreateBinary();
     fbDone  = xSemaphoreCreateBinary();
     xSemaphoreGive(fbDone);
 
-    // Pin display task to Core 1
+    // Pin display task to Core 1 at highest priority
     xTaskCreatePinnedToCore(
         displayTask, "display",
         4096, NULL,
