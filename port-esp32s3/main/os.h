@@ -6,6 +6,7 @@ extern "C" {
 void lcdInit();
 void lcdSetWindow(uint16_t x1, uint16_t y1, uint16_t x2, uint16_t y2);
 void lcdWriteFB(uint8_t *buf, int len);
+void lcdFlushDMA();
 void delayMS(int ms);
 void osInit();
 uint32_t osReadKey();
