@@ -98,9 +98,9 @@ extern "C" void app_main() {
         ESP_LOGE(TAG, "Failed to load ROM from %s — halting", ROM_PATH);
         // Blink backlight to signal error instead of silently hanging
         while (1) {
-            gpio_set_level(PIN_LCD_BCKL, 0);
+            gpio_set_level((gpio_num_t)PIN_LCD_BCKL, 0);
             delayMS(300);
-            gpio_set_level(PIN_LCD_BCKL, 1);
+            gpio_set_level((gpio_num_t)PIN_LCD_BCKL, 1);
             delayMS(300);
         }
     }

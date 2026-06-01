@@ -5,6 +5,7 @@ extern "C" {
 #endif
 
 #include <stdint.h>
+#include <stddef.h>
 
 void lcdInit();
 void lcdSetWindow(uint16_t x1, uint16_t y1, uint16_t x2, uint16_t y2);
