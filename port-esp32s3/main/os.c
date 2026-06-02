@@ -40,6 +40,7 @@ static void lcdWrite(uint8_t *buf, int len, int isCmd) {
 
 static void lcdCmd8(uint8_t cmd) { lcdWrite(&cmd, 1, 1); }
 static void lcdDat8(uint8_t dat) { lcdWrite(&dat, 1, 0); }
+
 static void lcdDat16(uint16_t dat) {
     uint8_t buf[2] = {dat >> 8, dat & 0xff};
     lcdWrite(buf, 2, 0);
@@ -87,11 +88,8 @@ void lcdFlushDMA() {
     }
 }
 
-// Fill rectangle with solid color
 void lcdFillRect(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16_t color) {
     lcdSetWindow(x, y, x + w - 1, y + h - 1);
-    int total = w * h * 2;
-    // Use a small stack buffer and repeat
     uint8_t buf[128];
     uint8_t hi = color >> 8;
     uint8_t lo = color & 0xff;
@@ -99,6 +97,7 @@ void lcdFillRect(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16_t color)
         buf[i]   = hi;
         buf[i+1] = lo;
     }
+    int total = w * h * 2;
     int sent = 0;
     while (sent < total) {
         int chunk = total - sent;
@@ -108,9 +107,7 @@ void lcdFillRect(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16_t color)
     }
 }
 
-// Draw single character using vgafont8
-void lcdDrawChar(uint16_t x, uint16_t y, char c,
-                 uint16_t fg, uint16_t bg) {
+void lcdDrawChar(uint16_t x, uint16_t y, char c, uint16_t fg, uint16_t bg) {
     if (c < 32 || c > 127) c = '?';
     const uint8_t *glyph = &vgafont8[(c - 32) * 8];
     lcdSetWindow(x, y, x + 7, y + 7);
@@ -127,9 +124,7 @@ void lcdDrawChar(uint16_t x, uint16_t y, char c,
     lcdWrite(buf, sizeof(buf), 0);
 }
 
-// Draw string
-void lcdDrawText(uint16_t x, uint16_t y, const char *text,
-                 uint16_t fg, uint16_t bg) {
+void lcdDrawText(uint16_t x, uint16_t y, const char *text, uint16_t fg, uint16_t bg) {
     while (*text) {
         lcdDrawChar(x, y, *text++, fg, bg);
         x += 8;
@@ -178,7 +173,7 @@ void lcdInit() {
     lcdCmd8(0xC1); lcdDat8(0x12);
     lcdCmd8(0xC5); lcdDat8(0x32); lcdDat8(0x3C);
     lcdCmd8(0xC7); lcdDat8(0x91);
-    lcdCmd8(0x36); lcdDat8(0xC8);
+    lcdCmd8(0x36); lcdDat8(0x48);
     lcdCmd8(0x3A); lcdDat8(0x55);
     lcdCmd8(0xB1); lcdDat8(0x00); lcdDat8(0x10);
     lcdCmd8(0xB6); lcdDat8(0x0A); lcdDat8(0xA2);
@@ -216,7 +211,6 @@ uint32_t osReadKey() {
     return ret;
 }
 
-// SD card init
 static sdmmc_card_t *sdCard = NULL;
 
 esp_err_t sdInit() {
@@ -241,11 +235,11 @@ esp_err_t sdInit() {
 
     sdspi_device_config_t slotCfg;
     memset(&slotCfg, 0, sizeof(slotCfg));
-    slotCfg.host_id   = SPI3_HOST;
-    slotCfg.gpio_cs   = PIN_SD_CS;
-    slotCfg.gpio_cd   = SDSPI_SLOT_NO_CD;
-    slotCfg.gpio_wp   = SDSPI_SLOT_NO_WP;
-    slotCfg.gpio_int  = GPIO_NUM_NC;
+    slotCfg.host_id  = SPI3_HOST;
+    slotCfg.gpio_cs  = PIN_SD_CS;
+    slotCfg.gpio_cd  = SDSPI_SLOT_NO_CD;
+    slotCfg.gpio_wp  = SDSPI_SLOT_NO_WP;
+    slotCfg.gpio_int = GPIO_NUM_NC;
 
     esp_err_t ret = esp_vfs_fat_sdspi_mount(
         "/sdcard", &host, &slotCfg, &mountCfg, &sdCard);
@@ -255,4 +249,17 @@ esp_err_t sdInit() {
     }
     ESP_LOGI(TAG, "SD card mounted");
     return ESP_OK;
+}
+
+void osInit() {
+    lcdInit();
+    for (int i = 0; i < 12; i++) {
+        int pin = osKeyMap[i];
+        if (pin != -1) {
+            gpio_set_direction(pin, GPIO_MODE_INPUT);
+            gpio_pullup_en(pin);
+            gpio_pulldown_dis(pin);
+        }
+    }
+    sdInit();
 }
