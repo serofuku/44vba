@@ -214,6 +214,15 @@ uint32_t osReadKey() {
 static sdmmc_card_t *sdCard = NULL;
 
 esp_err_t sdInit() {
+    // Pull-ups on all SD pins before init
+    gpio_set_pull_mode(PIN_SD_MISO, GPIO_PULLUP_ONLY);
+    gpio_set_pull_mode(PIN_SD_CLK,  GPIO_PULLUP_ONLY);
+    gpio_set_pull_mode(PIN_SD_MOSI, GPIO_PULLUP_ONLY);
+    gpio_set_pull_mode(PIN_SD_CS,   GPIO_PULLUP_ONLY);
+
+    // Small delay after pull-ups
+    delayMS(20);
+
     esp_vfs_fat_sdmmc_mount_config_t mountCfg = {
         .format_if_mount_failed = false,
         .max_files              = 8,
@@ -221,7 +230,8 @@ esp_err_t sdInit() {
     };
 
     sdmmc_host_t host = SDSPI_HOST_DEFAULT();
-    host.slot = SPI3_HOST;
+    host.slot         = SPI3_HOST;
+    host.max_freq_khz = 400; // Very slow for reliable init
 
     spi_bus_config_t sdBus = {
         .mosi_io_num     = PIN_SD_MOSI,
@@ -247,7 +257,10 @@ esp_err_t sdInit() {
         ESP_LOGE(TAG, "SD mount failed: %s", esp_err_to_name(ret));
         return ret;
     }
-    ESP_LOGI(TAG, "SD card mounted");
+
+    // After successful init speed up to 20MHz
+    host.max_freq_khz = 20000;
+    ESP_LOGI(TAG, "SD card mounted successfully");
     return ESP_OK;
 }
 
@@ -261,5 +274,17 @@ void osInit() {
             gpio_pulldown_dis(pin);
         }
     }
-    sdInit();
+
+    // Show SD status on screen
+    lcdFillRect(0, 0, LCD_W, LCD_H, 0x0000);
+    lcdDrawText(4, 140, "Initializing SD...", 0xFFFF, 0x0000);
+
+    esp_err_t ret = sdInit();
+    if (ret == ESP_OK) {
+        lcdDrawText(4, 160, "SD: OK!", 0x07E0, 0x0000);
+    } else {
+        lcdDrawText(4, 160, "SD: FAILED!", 0xFFE0, 0x0000);
+        lcdDrawText(4, 180, "Check wiring!", 0xFF00, 0x0000);
+    }
+    delayMS(1500);
 }
