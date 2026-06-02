@@ -22,7 +22,6 @@ void delayMS(int ms) { vTaskDelay(ms / portTICK_PERIOD_MS); }
 
 spi_device_handle_t spiDev0;
 
-// DMA transaction pool
 #define LCD_DMA_CHUNKS 8
 static spi_transaction_t dmaTransactions[LCD_DMA_CHUNKS];
 static int dmaQueued = 0;
@@ -189,7 +188,7 @@ void lcdInit() {
     lcdDat8(0x11); lcdDat8(0x07); lcdDat8(0x31); lcdDat8(0xC1);
     lcdDat8(0x48); lcdDat8(0x08); lcdDat8(0x0F); lcdDat8(0x0C);
     lcdDat8(0x31); lcdDat8(0x36); lcdDat8(0x0F);
-    lcdCmd8(0x11); delayMS(200);
+    // Fixed: removed duplicate 0x11 command
     lcdCmd8(0x29); delayMS(50);
 }
 
@@ -214,11 +213,11 @@ uint32_t osReadKey() {
 static sdmmc_card_t *sdCard = NULL;
 
 esp_err_t sdInit() {
-    // Manually configure SD pins first
+    // Configure MOSI and CLK as output with pull-up
+    // Fixed: removed CS from here — sdspi manages CS internally
     gpio_config_t io_conf = {
         .pin_bit_mask = (1ULL << PIN_SD_MOSI) |
-                        (1ULL << PIN_SD_CLK)  |
-                        (1ULL << PIN_SD_CS),
+                        (1ULL << PIN_SD_CLK),
         .mode         = GPIO_MODE_OUTPUT,
         .pull_up_en   = GPIO_PULLUP_ENABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
@@ -236,8 +235,6 @@ esp_err_t sdInit() {
     };
     gpio_config(&miso_conf);
 
-    // Set CS high before init
-    gpio_set_level(PIN_SD_CS, 1);
     delayMS(50);
 
     esp_vfs_fat_sdmmc_mount_config_t mountCfg = {
