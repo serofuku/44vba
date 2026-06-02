@@ -14,7 +14,7 @@
 #include "esp_system.h"
 #include "nvs_flash.h"
 #include "sdkconfig.h"
-#include "src/vgafont8.h"
+#include "../../src/vgafont8.h"
 
 #define TAG "OS"
 
