@@ -137,9 +137,9 @@ void lcdInit() {
     gpio_set_level(PIN_LCD_BCKL, 1);
     gpio_set_direction(PIN_SYS_RSTN, GPIO_MODE_OUTPUT);
     gpio_set_level(PIN_SYS_RSTN, 0);
-    delayMS(100);
+    delayMS(200);
     gpio_set_level(PIN_SYS_RSTN, 1);
-    delayMS(100);
+    delayMS(200);
     gpio_set_direction(PIN_LCD_DC, GPIO_MODE_OUTPUT);
     gpio_set_level(PIN_LCD_DC, 1);
 
@@ -189,8 +189,8 @@ void lcdInit() {
     lcdDat8(0x11); lcdDat8(0x07); lcdDat8(0x31); lcdDat8(0xC1);
     lcdDat8(0x48); lcdDat8(0x08); lcdDat8(0x0F); lcdDat8(0x0C);
     lcdDat8(0x31); lcdDat8(0x36); lcdDat8(0x0F);
-    lcdCmd8(0x11); delayMS(120);
-    lcdCmd8(0x29);
+    lcdCmd8(0x11); delayMS(200);
+    lcdCmd8(0x29); delayMS(50);
 }
 
 int osKeyMap[12] = {
@@ -214,14 +214,31 @@ uint32_t osReadKey() {
 static sdmmc_card_t *sdCard = NULL;
 
 esp_err_t sdInit() {
-    // Pull-ups on all SD pins before init
-    gpio_set_pull_mode(PIN_SD_MISO, GPIO_PULLUP_ONLY);
-    gpio_set_pull_mode(PIN_SD_CLK,  GPIO_PULLUP_ONLY);
-    gpio_set_pull_mode(PIN_SD_MOSI, GPIO_PULLUP_ONLY);
-    gpio_set_pull_mode(PIN_SD_CS,   GPIO_PULLUP_ONLY);
+    // Manually configure SD pins first
+    gpio_config_t io_conf = {
+        .pin_bit_mask = (1ULL << PIN_SD_MOSI) |
+                        (1ULL << PIN_SD_CLK)  |
+                        (1ULL << PIN_SD_CS),
+        .mode         = GPIO_MODE_OUTPUT,
+        .pull_up_en   = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type    = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&io_conf);
 
-    // Small delay after pull-ups
-    delayMS(20);
+    // Configure MISO as input with pull-up
+    gpio_config_t miso_conf = {
+        .pin_bit_mask = (1ULL << PIN_SD_MISO),
+        .mode         = GPIO_MODE_INPUT,
+        .pull_up_en   = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type    = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&miso_conf);
+
+    // Set CS high before init
+    gpio_set_level(PIN_SD_CS, 1);
+    delayMS(50);
 
     esp_vfs_fat_sdmmc_mount_config_t mountCfg = {
         .format_if_mount_failed = false,
@@ -231,7 +248,7 @@ esp_err_t sdInit() {
 
     sdmmc_host_t host = SDSPI_HOST_DEFAULT();
     host.slot         = SPI3_HOST;
-    host.max_freq_khz = 400; // Very slow for reliable init
+    host.max_freq_khz = 400;
 
     spi_bus_config_t sdBus = {
         .mosi_io_num     = PIN_SD_MOSI,
@@ -257,9 +274,6 @@ esp_err_t sdInit() {
         ESP_LOGE(TAG, "SD mount failed: %s", esp_err_to_name(ret));
         return ret;
     }
-
-    // After successful init speed up to 20MHz
-    host.max_freq_khz = 20000;
     ESP_LOGI(TAG, "SD card mounted successfully");
     return ESP_OK;
 }
