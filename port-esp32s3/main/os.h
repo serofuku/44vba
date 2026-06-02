@@ -3,6 +3,7 @@
 extern "C" {
 #endif
 #include <stdint.h>
+
 void lcdInit();
 void lcdSetWindow(uint16_t x1, uint16_t y1, uint16_t x2, uint16_t y2);
 void lcdWriteFB(uint8_t *buf, int len);
@@ -35,7 +36,7 @@ uint32_t osReadKey();
 #define PIN_KEY_SELECT (16)
 #define PIN_KEY_START  (17)
 
-// SD card pins (SPI mode)
+// SD card pins
 #define PIN_SD_MOSI   11
 #define PIN_SD_MISO   13
 #define PIN_SD_CLK    10
