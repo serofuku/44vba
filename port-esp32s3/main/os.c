@@ -239,4 +239,20 @@ esp_err_t sdInit() {
     };
     ESP_ERROR_CHECK(spi_bus_initialize(SPI3_HOST, &sdBus, SPI_DMA_CH_AUTO));
 
-    sdspi_device_config_t slotCfg = SDSPI_DE
+    sdspi_device_config_t slotCfg;
+    memset(&slotCfg, 0, sizeof(slotCfg));
+    slotCfg.host_id   = SPI3_HOST;
+    slotCfg.gpio_cs   = PIN_SD_CS;
+    slotCfg.gpio_cd   = SDSPI_SLOT_NO_CD;
+    slotCfg.gpio_wp   = SDSPI_SLOT_NO_WP;
+    slotCfg.gpio_int  = GPIO_NUM_NC;
+
+    esp_err_t ret = esp_vfs_fat_sdspi_mount(
+        "/sdcard", &host, &slotCfg, &mountCfg, &sdCard);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "SD mount failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
+    ESP_LOGI(TAG, "SD card mounted");
+    return ESP_OK;
+}
