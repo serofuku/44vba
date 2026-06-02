@@ -1,43 +1,40 @@
 #include "os.h"
-
 #include <stdlib.h>
 #include <string.h>
-#include <stdio.h>
-#include <sys/stat.h>
-
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
-#include "driver/sdmmc_host.h"
+#include "driver/sdspi_host.h"
+#include "driver/spi_common.h"
+#include "esp_vfs_fat.h"
+#include "sdmmc_cmd.h"
 #include "esp_err.h"
 #include "esp_log.h"
 #include "esp_system.h"
-#include "esp_vfs_fat.h"
-#include "sdmmc_cmd.h"
 #include "nvs_flash.h"
 #include "sdkconfig.h"
+#include "src/vgafont8.h"
 
 #define TAG "OS"
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
 void delayMS(int ms) { vTaskDelay(ms / portTICK_PERIOD_MS); }
 
-// ---------------------------------------------------------------------------
-// LCD (SPI2_HOST, unchanged from original)
-// ---------------------------------------------------------------------------
-
 spi_device_handle_t spiDev0;
+
+// DMA transaction pool
+#define LCD_DMA_CHUNKS 8
+static spi_transaction_t dmaTransactions[LCD_DMA_CHUNKS];
+static int dmaQueued = 0;
 
 static void lcdWrite(uint8_t *buf, int len, int isCmd) {
     if (len <= 0) return;
     gpio_set_level(PIN_LCD_DC, isCmd ? 0 : 1);
     spi_transaction_t t;
     memset(&t, 0, sizeof(t));
-    t.length = 8 * len;
+    t.length    = 8 * len;
     t.tx_buffer = buf;
-    ESP_ERROR_CHECK(spi_device_transmit(spiDev0, &t));
+    ESP_ERROR_CHECK(spi_device_polling_transmit(spiDev0, &t));
     gpio_set_level(PIN_LCD_DC, 1);
 }
 
@@ -49,54 +46,126 @@ static void lcdDat16(uint16_t dat) {
 }
 
 void lcdSetWindow(uint16_t x1, uint16_t y1, uint16_t x2, uint16_t y2) {
-    lcdCmd8(0x2A); lcdDat16(x1); lcdDat16(x2);
-    lcdCmd8(0x2B); lcdDat16(y1); lcdDat16(y2);
+    lcdCmd8(0x2A);
+    lcdDat16(x1);
+    lcdDat16(x2);
+    lcdCmd8(0x2B);
+    lcdDat16(y1);
+    lcdDat16(y2);
     lcdCmd8(0x2C);
 }
 
 void lcdWriteFB(uint8_t *buf, int len) {
     if (len <= 0) return;
-    const int maxLen = 240 * 60 * 2;
+    spi_transaction_t *rtrans;
+    while (dmaQueued > 0) {
+        ESP_ERROR_CHECK(spi_device_get_trans_result(spiDev0, &rtrans, portMAX_DELAY));
+        dmaQueued--;
+    }
+    gpio_set_level(PIN_LCD_DC, 1);
+    const int maxLen = 32760;
+    int chunk = 0;
     while (len > 0) {
         int writeLen = len > maxLen ? maxLen : len;
-        lcdWrite(buf, writeLen, 0);
+        spi_transaction_t *t = &dmaTransactions[chunk % LCD_DMA_CHUNKS];
+        memset(t, 0, sizeof(*t));
+        t->length    = 8 * writeLen;
+        t->tx_buffer = buf;
+        ESP_ERROR_CHECK(spi_device_queue_trans(spiDev0, t, portMAX_DELAY));
+        dmaQueued++;
         buf += writeLen;
         len -= writeLen;
+        chunk++;
+    }
+}
+
+void lcdFlushDMA() {
+    spi_transaction_t *rtrans;
+    while (dmaQueued > 0) {
+        ESP_ERROR_CHECK(spi_device_get_trans_result(spiDev0, &rtrans, portMAX_DELAY));
+        dmaQueued--;
+    }
+}
+
+// Fill rectangle with solid color
+void lcdFillRect(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16_t color) {
+    lcdSetWindow(x, y, x + w - 1, y + h - 1);
+    int total = w * h * 2;
+    // Use a small stack buffer and repeat
+    uint8_t buf[128];
+    uint8_t hi = color >> 8;
+    uint8_t lo = color & 0xff;
+    for (int i = 0; i < 128; i += 2) {
+        buf[i]   = hi;
+        buf[i+1] = lo;
+    }
+    int sent = 0;
+    while (sent < total) {
+        int chunk = total - sent;
+        if (chunk > 128) chunk = 128;
+        lcdWrite(buf, chunk, 0);
+        sent += chunk;
+    }
+}
+
+// Draw single character using vgafont8
+void lcdDrawChar(uint16_t x, uint16_t y, char c,
+                 uint16_t fg, uint16_t bg) {
+    if (c < 32 || c > 127) c = '?';
+    const uint8_t *glyph = &vgafont8[(c - 32) * 8];
+    lcdSetWindow(x, y, x + 7, y + 7);
+    uint8_t buf[8 * 8 * 2];
+    int idx = 0;
+    for (int row = 0; row < 8; row++) {
+        uint8_t bits = glyph[row];
+        for (int col = 7; col >= 0; col--) {
+            uint16_t color = (bits & (1 << col)) ? fg : bg;
+            buf[idx++] = color >> 8;
+            buf[idx++] = color & 0xff;
+        }
+    }
+    lcdWrite(buf, sizeof(buf), 0);
+}
+
+// Draw string
+void lcdDrawText(uint16_t x, uint16_t y, const char *text,
+                 uint16_t fg, uint16_t bg) {
+    while (*text) {
+        lcdDrawChar(x, y, *text++, fg, bg);
+        x += 8;
+        if (x + 8 > LCD_W) break;
     }
 }
 
 void lcdInit() {
     gpio_set_direction(PIN_LCD_BCKL, GPIO_MODE_OUTPUT);
     gpio_set_level(PIN_LCD_BCKL, 1);
-
     gpio_set_direction(PIN_SYS_RSTN, GPIO_MODE_OUTPUT);
     gpio_set_level(PIN_SYS_RSTN, 0);
     delayMS(100);
     gpio_set_level(PIN_SYS_RSTN, 1);
     delayMS(100);
-
     gpio_set_direction(PIN_LCD_DC, GPIO_MODE_OUTPUT);
     gpio_set_level(PIN_LCD_DC, 1);
 
     static const spi_bus_config_t buscfg = {
-        .miso_io_num = PIN_SPI0_MISO,
-        .mosi_io_num = PIN_SPI0_MOSI,
-        .sclk_io_num = PIN_SPI0_SCLK,
-        .quadwp_io_num = -1,
-        .quadhd_io_num = -1,
-        .max_transfer_sz = 120000,
+        .miso_io_num     = PIN_SPI0_MISO,
+        .mosi_io_num     = PIN_SPI0_MOSI,
+        .sclk_io_num     = PIN_SPI0_SCLK,
+        .quadwp_io_num   = -1,
+        .quadhd_io_num   = -1,
+        .max_transfer_sz = 32760,
     };
     ESP_ERROR_CHECK(spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO));
 
     static const spi_device_interface_config_t devcfg = {
-        .clock_speed_hz = 40000000,
-        .mode = 0,
-        .spics_io_num = -1,
-        .queue_size = 7,
+        .clock_speed_hz = 80000000,
+        .mode           = 0,
+        .spics_io_num   = -1,
+        .queue_size     = 8,
     };
     ESP_ERROR_CHECK(spi_bus_add_device(SPI2_HOST, &devcfg, &spiDev0));
 
-    // ILI9341 init sequence
     lcdCmd8(0x01); delayMS(50);
     lcdCmd8(0x11); delayMS(120);
     lcdCmd8(0xCF); lcdDat8(0x00); lcdDat8(0xC3); lcdDat8(0x30);
@@ -109,29 +178,25 @@ void lcdInit() {
     lcdCmd8(0xC1); lcdDat8(0x12);
     lcdCmd8(0xC5); lcdDat8(0x32); lcdDat8(0x3C);
     lcdCmd8(0xC7); lcdDat8(0x91);
-    lcdCmd8(0x36); lcdDat8(0x48);
+    lcdCmd8(0x36); lcdDat8(0xC8);
     lcdCmd8(0x3A); lcdDat8(0x55);
     lcdCmd8(0xB1); lcdDat8(0x00); lcdDat8(0x10);
     lcdCmd8(0xB6); lcdDat8(0x0A); lcdDat8(0xA2);
     lcdCmd8(0xF2); lcdDat8(0x00);
     lcdCmd8(0x26); lcdDat8(0x01);
     lcdCmd8(0xE0);
-        lcdDat8(0x0F); lcdDat8(0x31); lcdDat8(0x2B); lcdDat8(0x0C);
-        lcdDat8(0x0E); lcdDat8(0x08); lcdDat8(0x4E); lcdDat8(0xF1);
-        lcdDat8(0x37); lcdDat8(0x07); lcdDat8(0x10); lcdDat8(0x03);
-        lcdDat8(0x0E); lcdDat8(0x09); lcdDat8(0x00);
+    lcdDat8(0x0F); lcdDat8(0x31); lcdDat8(0x2B); lcdDat8(0x0C);
+    lcdDat8(0x0E); lcdDat8(0x08); lcdDat8(0x4E); lcdDat8(0xF1);
+    lcdDat8(0x37); lcdDat8(0x07); lcdDat8(0x10); lcdDat8(0x03);
+    lcdDat8(0x0E); lcdDat8(0x09); lcdDat8(0x00);
     lcdCmd8(0xE1);
-        lcdDat8(0x00); lcdDat8(0x0E); lcdDat8(0x14); lcdDat8(0x03);
-        lcdDat8(0x11); lcdDat8(0x07); lcdDat8(0x31); lcdDat8(0xC1);
-        lcdDat8(0x48); lcdDat8(0x08); lcdDat8(0x0F); lcdDat8(0x0C);
-        lcdDat8(0x31); lcdDat8(0x36); lcdDat8(0x0F);
+    lcdDat8(0x00); lcdDat8(0x0E); lcdDat8(0x14); lcdDat8(0x03);
+    lcdDat8(0x11); lcdDat8(0x07); lcdDat8(0x31); lcdDat8(0xC1);
+    lcdDat8(0x48); lcdDat8(0x08); lcdDat8(0x0F); lcdDat8(0x0C);
+    lcdDat8(0x31); lcdDat8(0x36); lcdDat8(0x0F);
     lcdCmd8(0x11); delayMS(120);
     lcdCmd8(0x29);
 }
-
-// ---------------------------------------------------------------------------
-// Input (unchanged from original)
-// ---------------------------------------------------------------------------
 
 int osKeyMap[12] = {
     PIN_KEY_A, PIN_KEY_B, PIN_KEY_SELECT, PIN_KEY_START,
@@ -151,133 +216,27 @@ uint32_t osReadKey() {
     return ret;
 }
 
-// ---------------------------------------------------------------------------
-// SD card (SPI3_HOST)
-// ---------------------------------------------------------------------------
-
+// SD card init
 static sdmmc_card_t *sdCard = NULL;
 
-static esp_err_t sdMount() {
-    ESP_LOGI(TAG, "Mounting SD card...");
+esp_err_t sdInit() {
+    esp_vfs_fat_sdmmc_mount_config_t mountCfg = {
+        .format_if_mount_failed = false,
+        .max_files              = 8,
+        .allocation_unit_size   = 16 * 1024,
+    };
 
     sdmmc_host_t host = SDSPI_HOST_DEFAULT();
     host.slot = SPI3_HOST;
 
-    spi_bus_config_t sdBusCfg = {
-        .mosi_io_num = PIN_SD_MOSI,
-        .miso_io_num = PIN_SD_MISO,
-        .sclk_io_num = PIN_SD_SCLK,
-        .quadwp_io_num = -1,
-        .quadhd_io_num = -1,
+    spi_bus_config_t sdBus = {
+        .mosi_io_num     = PIN_SD_MOSI,
+        .miso_io_num     = PIN_SD_MISO,
+        .sclk_io_num     = PIN_SD_CLK,
+        .quadwp_io_num   = -1,
+        .quadhd_io_num   = -1,
         .max_transfer_sz = 4096,
     };
-    esp_err_t ret = spi_bus_initialize(SPI3_HOST, &sdBusCfg, SPI_DMA_CH_AUTO);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "SD SPI bus init failed: %s", esp_err_to_name(ret));
-        return ret;
-    }
+    ESP_ERROR_CHECK(spi_bus_initialize(SPI3_HOST, &sdBus, SPI_DMA_CH_AUTO));
 
-    sdspi_device_config_t slotCfg = SDSPI_DEVICE_CONFIG_DEFAULT();
-    slotCfg.gpio_cs = PIN_SD_CS;
-    slotCfg.host_id = SPI3_HOST;
-
-    esp_vfs_fat_sdmmc_mount_config_t mountCfg = {
-        .format_if_mount_failed = false,
-        .max_files = 4,
-        .allocation_unit_size = 16 * 1024,
-    };
-
-    ret = esp_vfs_fat_sdspi_mount(SD_MOUNT_POINT, &host, &slotCfg,
-                                  &mountCfg, &sdCard);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "SD mount failed: %s", esp_err_to_name(ret));
-        return ret;
-    }
-
-    sdmmc_card_print_info(stdout, sdCard);
-    ESP_LOGI(TAG, "SD card mounted at %s", SD_MOUNT_POINT);
-    return ESP_OK;
-}
-
-uint8_t *sdLoadRom(const char *path, size_t *romSizeOut) {
-    if (romSizeOut) *romSizeOut = 0;
-
-    // Mount SD if not already mounted
-    if (sdCard == NULL) {
-        if (sdMount() != ESP_OK) {
-            ESP_LOGE(TAG, "Cannot load ROM: SD not mounted");
-            return NULL;
-        }
-    }
-
-    // Get file size
-    struct stat st;
-    if (stat(path, &st) != 0) {
-        ESP_LOGE(TAG, "ROM file not found: %s", path);
-        return NULL;
-    }
-    size_t fileSize = (size_t)st.st_size;
-    ESP_LOGI(TAG, "ROM size: %u bytes (%.2f MB)", fileSize,
-             fileSize / 1048576.0f);
-
-    // GBA ROMs must be at least 192 bytes (header) and <= 32MB
-    if (fileSize < 192 || fileSize > 32 * 1024 * 1024) {
-        ESP_LOGE(TAG, "ROM size out of range: %u", fileSize);
-        return NULL;
-    }
-
-    // Allocate in PSRAM (malloc goes to PSRAM when
-    // CONFIG_SPIRAM_USE_MALLOC=y and size > SPIRAM_MALLOC_ALWAYSINTERNAL)
-    uint8_t *buf = (uint8_t *)malloc(fileSize);
-    if (!buf) {
-        ESP_LOGE(TAG, "Failed to allocate %u bytes for ROM", fileSize);
-        return NULL;
-    }
-    ESP_LOGI(TAG, "ROM buffer allocated at %p", buf);
-
-    // Read file in 32KB chunks to avoid stack overflow
-    FILE *f = fopen(path, "rb");
-    if (!f) {
-        ESP_LOGE(TAG, "Cannot open ROM: %s", path);
-        free(buf);
-        return NULL;
-    }
-
-    const size_t chunkSize = 32 * 1024;
-    size_t bytesRead = 0;
-    while (bytesRead < fileSize) {
-        size_t toRead = fileSize - bytesRead;
-        if (toRead > chunkSize) toRead = chunkSize;
-        size_t n = fread(buf + bytesRead, 1, toRead, f);
-        if (n == 0) {
-            ESP_LOGE(TAG, "Read error at offset %u", bytesRead);
-            fclose(f);
-            free(buf);
-            return NULL;
-        }
-        bytesRead += n;
-    }
-    fclose(f);
-
-    ESP_LOGI(TAG, "ROM loaded: %u bytes", bytesRead);
-    if (romSizeOut) *romSizeOut = bytesRead;
-    return buf;
-}
-
-// ---------------------------------------------------------------------------
-// osInit
-// ---------------------------------------------------------------------------
-
-void osInit() {
-    lcdInit();
-
-    // Init button GPIOs
-    for (int i = 0; i < 12; i++) {
-        int pin = osKeyMap[i];
-        if (pin != -1) {
-            gpio_set_direction(pin, GPIO_MODE_INPUT);
-            gpio_pullup_en(pin);
-            gpio_pulldown_dis(pin);
-        }
-    }
-}
+    sdspi_device_config_t slotCfg = SDSPI_DE
